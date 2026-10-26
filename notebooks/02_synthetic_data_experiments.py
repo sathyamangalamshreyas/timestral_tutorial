@@ -201,8 +201,16 @@ def evaluate_scenario(
     )
 
     period = 24
-    seasonal_scale = np.mean(
-        np.abs(context[period:] - context[:-period])
+    seasonal_differences = np.abs(
+    context[period:] - context[:-period]
+    )
+
+    valid_differences = np.isfinite(seasonal_differences)
+
+    seasonal_scale = (
+    seasonal_differences[valid_differences].mean()
+    if valid_differences.any()
+    else np.nan
     )
 
     seasonal_naive = np.tile(
@@ -300,7 +308,7 @@ def _(CONTEXT_LENGTH, TOTAL_LENGTH):
         seasonality[future] = (
             future_amplitude * np.sin(2 * np.pi * t[future] / future_period)
         )
-    
+
         return 30 + 0.015 * t + seasonality + noise
 
     seasonality_scenarios = {
@@ -417,13 +425,13 @@ def _():
 
 
 @app.cell
-def _(TOTAL_LENGTH, make_synthetic_series):
+def _(CONTEXT_LENGTH, TOTAL_LENGTH, make_synthetic_series):
     def make_ar1_series(
         phi: float = 0.8,
         noise_scale: float = 0.8,
         seed: int = 42,
     ) -> np.ndarray:
-    
+
         t = np.arange(TOTAL_LENGTH)
         rng = np.random.default_rng(seed=seed)
 
@@ -455,6 +463,366 @@ def _(TOTAL_LENGTH, make_synthetic_series):
         noise_scale=0.8,
         seed=42,
     )
+
+    # Scenario 1: Temporally correlated noise
+    ar1_series = make_ar1_series(phi=0.8, seed=42)
+
+    # Scenario 2: One outlier in the historical context
+    historical_outlier_series = reference_series.copy()
+    historical_outlier_series[CONTEXT_LENGTH - 36] += 10
+
+    # Scenario 3: Two outliers in the future
+    future_outlier_series = reference_series.copy()
+    future_outlier_series[CONTEXT_LENGTH + 12] += 10
+    future_outlier_series[CONTEXT_LENGTH + 34] -= 8
+
+    # Scenario 4: Approximately 10% of the older historical
+    # observations are missing. Keep the latest 24 hours intact
+    missing_series = reference_series.copy()
+
+    missing_rng = np.random.default_rng(202)
+    eligible_indices = np.arange(CONTEXT_LENGTH - 24)
+    num_missing = int(0.10 * len(eligible_indices))
+
+    missing_indices = missing_rng.choice(
+        eligible_indices,
+        size=num_missing,
+        replace=False,
+    )
+
+    missing_series[missing_indices] = np.nan
+
+    experiment_scenarios = {
+        "Rerference (white noise)": reference_series,
+        "AR(1) noise": ar1_series,
+        "Historical outliers": historical_outlier_series,
+        "Future outliers": future_outlier_series,
+        "10% missing history": missing_series,
+    }
+    return (experiment_scenarios,)
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Forecast and evaluate scenarios
+    """)
+    return
+
+
+@app.cell
+def _(CONTEXT_LENGTH, HORIZON, experiment_scenarios, forecaster):
+    def _():
+        experiment_results = []
+        experiment_forecasts = {}
+
+        for name, series in experiment_scenarios.items():
+            context = series[:CONTEXT_LENGTH]
+            actual_future = series[CONTEXT_LENGTH:]
+
+            forecast = forecaster.forecast(
+                context=context,
+                prediction_length=HORIZON,
+            )
+
+            experiment_forecasts[name] = forecast
+
+            metrics = evaluate_scenario(
+                context=context,
+                actual=actual_future,
+                forecast=forecast,
+            )
+
+            experiment_results.append({
+                "Scenario": name,
+                **metrics,
+            })
+
+            experiment_results_df = (
+                pd.DataFrame(experiment_results).set_index("Scenario")
+            )
+        return experiment_results_df.round(4)
+
+
+    _()
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    ### Test forecast accuracy with known-future covariate
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    We'll compare two forecasts on exactly the same target data:
+    - Baseline: Timestral receives the target history only
+    - Covariate-aware: Timestral receives the same target history plus the promotion schedule, including future promotions
+    """)
+    return
+
+
+@app.cell
+def _(CONTEXT_LENGTH, TOTAL_LENGTH):
+    promo_t = np.arange(TOTAL_LENGTH)
+    promo_rng = np.random.default_rng(seed=42)
+
+    # Promotion schedule: 0 = no promotion, 1 = promotion
+    promo_indicator = np.zeros(TOTAL_LENGTH, dtype=float)
+
+    # Historical promotions: varying days and starting hours
+    historical_promotions = [
+        (2, 12),
+        (5, 19),
+        (8, 9),
+        (11, 18),
+        (13, 13),
+    ]
+
+    for day, start_hour in historical_promotions:
+        start = day * 24 + start_hour
+        promo_indicator[start:start + 6] = 1.0
+
+    # Future promotions: these are known in advance
+    promo_indicator[CONTEXT_LENGTH + 12:
+        CONTEXT_LENGTH + 18] = 1.0
+
+    promo_indicator[CONTEXT_LENGTH + 36:
+        CONTEXT_LENGTH + 42] = 1.0
+
+    # Demand is influenced by trend, daily seasonality
+    # promotions and random noise
+    promo_target = (
+        30
+        + 0.015 * promo_t
+        + 4.0 + np.sin(2 * np.pi * promo_t / 24)
+        + 6.0 * promo_indicator
+        + promo_rng.normal(0, 0.8, size=TOTAL_LENGTH)
+    )
+
+    promo_context = promo_target [:CONTEXT_LENGTH]
+    promo_actual = promo_target[CONTEXT_LENGTH:]
+
+    print("Historical observations:", len(promo_context))
+    print("Future observations:", len(promo_actual))
+    print("Future promotion hours:", int(promo_indicator[CONTEXT_LENGTH:].sum()))
+    return promo_actual, promo_context, promo_indicator
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Visualize the covariate data
+    """)
+    return
+
+
+@app.cell
+def _(
+    CONTEXT_LENGTH,
+    TOTAL_LENGTH,
+    promo_actual,
+    promo_context,
+    promo_indicator,
+):
+    def _():
+        fig, (ax, ax_promo) = plt.subplots(
+            2, 1,
+            figsize=(12, 7),
+            sharex=True,
+            gridspec_kw={"height_ratios": [3, 1]},
+        )
+
+        ax.plot(
+            np.arange(CONTEXT_LENGTH),
+            promo_context,
+            label="Historical demand",
+        )
+
+        ax.plot(
+            np.arange(CONTEXT_LENGTH, TOTAL_LENGTH),
+            promo_actual,
+            label="Actual Future Demand",
+        )
+
+        ax.axvline(CONTEXT_LENGTH, linestyle="--", color="r", label="Forecast Origin")
+        ax.set_ylabel("Demand")
+        ax.legend()
+
+        ax_promo.step(
+            np.arange(CONTEXT_LENGTH, TOTAL_LENGTH),
+            promo_indicator[CONTEXT_LENGTH:],
+            where="post",
+            label="Known-future promotion",
+        )
+
+        ax_promo.set_ylabel("Promotion")
+        return ax_promo.set_xlabel("Hour")
+        ax_promo.set_ylim(-0.1, 1.1)
+        ax_promo.legend()
+
+        fig.tight_layout()
+        fig
+
+    _()
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Forecast with and without the covariates
+    """)
+    return
+
+
+@app.cell
+def _(HORIZON, TOTAL_LENGTH, forecaster, promo_context, promo_indicator):
+    # Baseline: target history only
+    promo_forecast_baseline = forecaster.forecast(
+        promo_context,
+        prediction_length=HORIZON,
+    )
+
+    # The known-covariate array includes BOTH historical
+    # and future values. Shape: (batch, covariates, time)
+    known_promotion = promo_indicator[None, None, :]
+
+    assert known_promotion.shape == (1, 1, TOTAL_LENGTH)
+
+    # Covariate-aware forecast
+    promo_forecast_known = forecaster.forecast(
+        promo_context,
+        prediction_length=HORIZON,
+        known_covariates=known_promotion,
+    )
+
+    print(
+        "Baseline forecase shape:",
+        tuple(promo_forecast_baseline.median.shape),
+    )
+
+    print(
+        "Covariate forecast shape:",
+        tuple(promo_forecast_known.median.shape),
+    )
+    return promo_forecast_baseline, promo_forecast_known
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Compare the forecasts
+    """)
+    return
+
+
+@app.cell
+def _(
+    CONTEXT_LENGTH,
+    TOTAL_LENGTH,
+    promo_actual,
+    promo_forecast_baseline,
+    promo_forecast_known,
+):
+    def _():
+        promo_baseline_median = (
+            promo_forecast_baseline.median[0, 0]
+                .detach().cpu().numpy()
+        )
+
+        promo_known_median = (
+            promo_forecast_known.median[0, 0]
+                .detach().cpu().numpy()
+        )
+
+        promo_lower = (
+            promo_forecast_known.quantile(0.1)[0, 0]
+                .detach().cpu().numpy()
+        )
+
+        promo_upper = (
+            promo_forecast_known.quantile(0.9)[0, 0]
+                .detach().cpu().numpy()
+        )
+
+        future_t = np.arange(CONTEXT_LENGTH, TOTAL_LENGTH)
+
+        fig, ax = plt.subplots(figsize=(12, 5))
+
+        ax.plot(future_t, promo_actual, label="Actual future demand")
+        ax.plot(future_t, promo_baseline_median, label="Target-only forecast")
+        ax.plot(future_t, promo_known_median, label="Forecast with promotion covariate")
+
+        ax.fill_between(
+            future_t,
+            promo_lower,
+            promo_upper,
+            alpha=0.2,
+            label="Covariate-aware 80% interval",
+        )
+
+        ax.set(
+            title="Effect of known-future promotion covariate",
+            xlabel="Hour",
+            ylabel="Demand",
+        )
+
+        ax.legend()
+        fig.tight_layout()
+        return fig
+
+
+    _()
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Compare the errors
+    """)
+    return
+
+
+@app.cell
+def _(
+    promo_actual,
+    promo_context,
+    promo_forecast_baseline,
+    promo_forecast_known,
+):
+    promo_comparison = pd.DataFrame(
+        [
+            {
+                "Approach": "Target only",
+                **evaluate_scenario(
+                    promo_context,
+                    promo_actual,
+                    promo_forecast_baseline,
+                ),
+            },
+            {
+                "Approach": "Target + known-future promotion",
+                **evaluate_scenario(
+                    promo_context,
+                    promo_actual,
+                    promo_forecast_known,
+                ),
+            },
+        ]
+    ).set_index("Approach")
+
+    promo_comparison.round(4)
+    return
+
+
+@app.cell
+def _():
     return
 
 
