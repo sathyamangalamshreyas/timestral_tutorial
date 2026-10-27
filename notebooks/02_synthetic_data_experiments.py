@@ -821,6 +821,643 @@ def _(
     return
 
 
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    ### Numeric Past-only Covariates
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    Test a different situation: a useful numeric feature is available historically, but its future values are not known when the forecast is made.
+    """)
+    return
+
+
+@app.cell
+def _(CONTEXT_LENGTH, TOTAL_LENGTH):
+    cov_t = np.arange(TOTAL_LENGTH)
+    cov_rng = np.random.default_rng(2026)
+
+    # Simulate a persistant upstream sensor signal
+    innovations = cov_rng.normal(0, 0.35, size=TOTAL_LENGTH)
+    sensor_state = np.zeros(TOTAL_LENGTH)
+
+    for i in range(1, TOTAL_LENGTH):
+        sensor_state[i] = 0.95 * sensor_state[i - 1] + innovations[i]
+
+    upstream_sensor = (
+        10
+        + 1.5 * np.sin(2 * np.pi * cov_t / 72)
+        + sensor_state
+    )
+
+    # The target responds to the upstream signal with a
+    # 24-hour delay
+    lag = 24
+    lagged_sensor = np.empty(TOTAL_LENGTH)
+    lagged_sensor[:lag] = upstream_sensor[0]
+    lagged_sensor[lag:] = upstream_sensor[:-lag]
+
+    sensor_noise = cov_rng.normal(0, 0.8, size=TOTAL_LENGTH)
+
+    sensor_target = (
+        30
+        + 0.015 * cov_t
+        + 4.0 * np.sin(2 * np.pi * cov_t / 24)
+        + 1.5 * (lagged_sensor - 10)
+        + sensor_noise
+    )
+
+    sensor_context = sensor_target[:CONTEXT_LENGTH]
+    sensor_actual = sensor_target[CONTEXT_LENGTH:]
+
+    print("Historical Observations:", len(sensor_context))
+    print("Future Observations:", len(sensor_actual))
+    return sensor_actual, sensor_context, upstream_sensor
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Visualize the past-known covariate data
+    """)
+    return
+
+
+@app.cell
+def _(
+    CONTEXT_LENGTH,
+    TOTAL_LENGTH,
+    sensor_actual,
+    sensor_context,
+    upstream_sensor,
+):
+    def _():
+        def visualize_sensor_forecast():
+            fig, (ax, ax_upstream) = plt.subplots(
+                2, 1,
+                figsize=(12, 7),
+                sharex=True,
+                gridspec_kw={"height_ratios": [3, 1]},
+            )
+
+            # 1. Top Panel: Target Sensor (Historical vs. Actual Future)
+            ax.plot(
+                np.arange(CONTEXT_LENGTH),
+                sensor_context,
+                label="Historical Sensor Target",
+                color="royalblue"
+            )
+
+            ax.plot(
+                np.arange(CONTEXT_LENGTH, TOTAL_LENGTH),
+                sensor_actual,
+                label="Actual Future Sensor Target",
+                color="darkorange"
+            )
+
+            ax.axvline(CONTEXT_LENGTH, linestyle="--", color="r", label="Forecast Origin")
+            ax.set_ylabel("Sensor Target")
+            ax.legend(loc="upper left")
+            ax.grid(True, alpha=0.3)
+
+            # 2. Bottom Panel: Upstream Sensor Signal
+            ax_upstream.plot(
+                np.arange(TOTAL_LENGTH),
+                upstream_sensor,
+                label="Upstream Sensor Signal",
+                color="seagreen",
+                alpha=0.8
+            )
+        
+            ax_upstream.axvline(CONTEXT_LENGTH, linestyle="--", color="r", alpha=0.5, label="Forecast Origin")
+            ax_upstream.set_ylabel("Upstream")
+            ax_upstream.set_xlabel("Hour")
+            ax_upstream.legend(loc="upper left")
+            ax_upstream.grid(True, alpha=0.3)
+
+            fig.tight_layout()
+            return fig
+
+        # Execute the visualization
+        fig = visualize_sensor_forecast()
+        return plt.show()
+
+
+    _()
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Forecast with and without the sensor
+    """)
+    return
+
+
+@app.cell
+def _(CONTEXT_LENGTH, HORIZON, forecaster, sensor_context, upstream_sensor):
+    # Forecast using the target history only
+    sensor_forecast_baseline = forecaster.forecast(
+        sensor_context,
+        prediction_length=HORIZON,
+    )
+
+    # Only the historical sensor readings are supplied
+    past_sensor = upstream_sensor[:CONTEXT_LENGTH][None, None, :]
+
+    assert past_sensor.shape == (1, 1, CONTEXT_LENGTH)
+
+    sensor_forecast_cov = forecaster.forecast(
+        sensor_context,
+        prediction_length=HORIZON,
+        past_covariates=past_sensor,
+    )
+
+    print(
+        "Past-covariate shape:",
+        past_sensor.shape,
+    )
+
+    print(
+        "Forecast shape:",
+        tuple(sensor_forecast_cov.median.shape),
+    )
+    return sensor_forecast_baseline, sensor_forecast_cov
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Compare the two forecasts
+    """)
+    return
+
+
+@app.cell
+def _(
+    sensor_actual,
+    sensor_context,
+    sensor_forecast_baseline,
+    sensor_forecast_cov,
+):
+    sensor_comparison = pd.DataFrame(
+        [
+            {
+                "Approach": "Target Only",
+                **evaluate_scenario(
+                    sensor_context,
+                    sensor_actual,
+                    sensor_forecast_baseline,
+                ),
+            },
+            {
+                "Approach": "Target + past sensor",
+                **evaluate_scenario(
+                    sensor_context,
+                    sensor_actual,
+                    sensor_forecast_cov,
+                ),
+            },
+        ]
+    ).set_index("Approach")
+
+    sensor_comparison.round(4)
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    ### Categorical covariates: day of week
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    Test whether Timestral can use a calendar category to anticipate systematic differences in demand.
+    """)
+    return
+
+
+@app.cell
+def _(CONTEXT_LENGTH):
+    DAY_LENGTH = 24
+    CATEGORY_HORIZON = 7 * DAY_LENGTH
+    CATEGORY_TOTAL_LENGTH = CONTEXT_LENGTH + CATEGORY_HORIZON
+
+    cat_t = np.arange(CATEGORY_TOTAL_LENGTH)
+    cat_rng = np.random.default_rng(314)
+
+    # Assume t=0 is Monday: Monday=0,..., Sunday=6
+    day_of_week = (cat_t // DAY_LENGTH) % 7
+
+    # Synthetic Demand effect for each weekday
+    weekday_effects = np.array([
+        0.0, # Monday
+        0.5, # Tuesday
+        0.8, # Wednesday
+        1.0, # Thursday
+        1.5, # Friday
+        -3.0, # Saturday
+        -2.0, # Sunday
+    ])
+
+    weekday_effect = weekday_effects[day_of_week]
+
+    categorical_target = (
+        30
+        + 0.015 * cat_t
+        + 4.0 * np.sin(2 * np.pi * cat_t / 24)
+        + weekday_effect
+        + cat_rng.normal(0, 0.8, size=CATEGORY_TOTAL_LENGTH)
+    )
+
+    categorical_context = categorical_target[:CONTEXT_LENGTH]
+    categorical_actual = categorical_target[CONTEXT_LENGTH:]
+
+    # Category codes for the entire historical + future timeline
+    # Shape: (batch, categorical covariates, time)
+    weekday_codes = day_of_week.astype(float)[None, None, :]
+
+    print(f"Context shape: {categorical_context.shape}")
+    print(f"Actual future shape: {categorical_actual.shape}")
+    print(f"Categorical covariate shape: {weekday_codes.shape}")
+    return (
+        CATEGORY_HORIZON,
+        CATEGORY_TOTAL_LENGTH,
+        DAY_LENGTH,
+        categorical_actual,
+        categorical_context,
+        weekday_codes,
+    )
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Plot the historical and future pattern
+    """)
+    return
+
+
+@app.cell
+def _(
+    CATEGORY_TOTAL_LENGTH,
+    CONTEXT_LENGTH,
+    DAY_LENGTH,
+    categorical_actual,
+    categorical_context,
+):
+    def _():
+        fig, ax = plt.subplots(figsize=(12, 5))
+
+        # Convert hour indices to day indices
+        day_context = np.arange(CONTEXT_LENGTH) / DAY_LENGTH
+        day_actual = np.arange(CONTEXT_LENGTH, CATEGORY_TOTAL_LENGTH) / DAY_LENGTH
+        forecast_origin_day = CONTEXT_LENGTH / DAY_LENGTH
+
+        ax.plot(
+            day_context,
+            categorical_context,
+            label="Historical demand",
+        )
+
+        ax.plot(
+            day_actual,
+            categorical_actual,
+            label="Actual future demand",
+        )
+
+        ax.axvline(
+            forecast_origin_day,
+            linestyle="--",
+            color='r',
+            label="Forecast Origin",
+        )
+
+        ax.set(
+            title="Synthetic demand with weekday effects",
+            xlabel="Day",
+            ylabel="Demand",
+        )
+
+        ax.legend()
+        fig.tight_layout()
+        return fig
+
+    _()
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    ### Compare the forecasts with and without the category effect
+    """)
+    return
+
+
+@app.cell
+def _(CATEGORY_HORIZON, categorical_context, forecaster, weekday_codes):
+    # Target-only forecast
+    weekday_forecast_baseline = forecaster.forecast(
+        categorical_context,
+        prediction_length=CATEGORY_HORIZON,
+    )
+
+    # Forecast with a known-future categorical feature
+    weekday_forecast_known = forecaster.forecast(
+        categorical_context,
+        prediction_length=CATEGORY_HORIZON,
+        categorical_known_covariates=weekday_codes,
+    )
+
+    print(
+        "Target-only median shape:",
+        tuple(weekday_forecast_baseline.median.shape),
+    )
+
+    print(
+        "Categorical median shape:",
+        tuple(weekday_forecast_known.median.shape),
+    )
+    return weekday_forecast_baseline, weekday_forecast_known
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Visualize the forecasts
+    """)
+    return
+
+
+@app.cell
+def _(
+    CATEGORY_TOTAL_LENGTH,
+    CONTEXT_LENGTH,
+    categorical_actual,
+    weekday_forecast_baseline,
+    weekday_forecast_known,
+):
+    def _():
+        weekday_baseline_median = (
+            weekday_forecast_baseline.median[0, 0]
+            .detach().cpu().numpy()
+        )
+
+        weekly_known_median = (
+            weekday_forecast_known.median[0, 0]
+            .detach().cpu().numpy()
+        )
+
+        future_t = np.arange(CONTEXT_LENGTH, CATEGORY_TOTAL_LENGTH)
+
+        fig, ax = plt.subplots(figsize=(13, 5))
+
+        ax.plot(
+            future_t,
+            categorical_actual,
+            label="Actual future demand",
+        )
+
+        ax.plot(
+            future_t,
+            weekday_baseline_median,
+            label="Target Only",
+        )
+
+        ax.plot(
+            future_t,
+            weekly_known_median,
+            label="Target + Weekday category",
+        )
+
+        ax.set(
+            title="Weekly demand forecast",
+            xlabel="Hour",
+            ylabel="Demand",
+        )
+
+        ax.legend()
+        fig.tight_layout()
+        return fig
+
+
+    _()
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Evaluate the metrics
+    """)
+    return
+
+
+@app.cell
+def _(
+    DAY_LENGTH,
+    categorical_actual,
+    categorical_context,
+    weekday_forecast_baseline,
+    weekday_forecast_known,
+):
+    def _():
+        weekly_naive = np.tile(
+            categorical_context[-7 * DAY_LENGTH:],
+            int(np.ceil(len(categorical_actual) / (7 * DAY_LENGTH))),
+        )[:len(categorical_actual)]
+
+        weekly_naive_mae = np.mean(
+            np.abs(categorical_actual - weekly_naive)
+        )
+
+        weekday_results = []
+
+        for name, forecast in [
+            ("Target only", weekday_forecast_baseline),
+            ("Target + weekday category", weekday_forecast_known),
+        ]:
+            row = {
+                "Approach": name,
+                **evaluate_scenario(
+                    categorical_context,
+                    categorical_actual,
+                    forecast,
+                ),
+            }
+
+            row["Weekly seasonal naive MAE"] = weekly_naive_mae
+            weekday_results.append(row)
+
+        weekday_comparison = (
+            pd.DataFrame(weekday_results)
+            .set_index("Approach")
+        )
+        return weekday_comparison.round(4)
+
+
+    _()
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    ### Known-past-only categorical covariates
+    """)
+    return
+
+
+@app.cell
+def _(CONTEXT_LENGTH, TOTAL_LENGTH):
+    state_t = np.arange(TOTAL_LENGTH)
+    state_rng = np.random.default_rng(2718)
+
+    # 0 = idle, 1 = running.
+    machine_state = np.zeros(TOTAL_LENGTH, dtype=float)
+
+    machine_state[120:216] = 1
+    machine_state[216:288] = 0
+    machine_state[288:] = 1
+
+    # Operating state affects both the level and the amplitude
+    # of the daily pattern.
+    daily_amplitude = np.where(machine_state == 1, 5.0, 2.0)
+
+    state_target = (
+        30
+        + 0.015 * state_t
+        + daily_amplitude * np.sin(2 * np.pi * state_t / 24)
+        + 5.0 * machine_state
+        + state_rng.normal(0, 0.8, size=TOTAL_LENGTH)
+    )
+
+    state_context = state_target[:CONTEXT_LENGTH]
+    state_actual = state_target[CONTEXT_LENGTH:]
+
+    # Only historical operating-state codes are supplied.
+    past_state_codes = machine_state[:CONTEXT_LENGTH][None, None, :]
+
+    print("Historical target:", state_context.shape)
+    print("Future target:", state_actual.shape)
+    print("Past-only category:", past_state_codes.shape)
+    return machine_state, past_state_codes, state_actual, state_context
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Visualize the data
+    """)
+    return
+
+
+@app.cell
+def _(
+    CONTEXT_LENGTH,
+    TOTAL_LENGTH,
+    machine_state,
+    state_actual,
+    state_context,
+):
+    def _():
+        fig, (ax1, ax2) = plt.subplots(
+            2, 1,
+            figsize=(12, 7),
+            sharex=True,
+        )
+
+        ax1.plot(
+            np.arange(CONTEXT_LENGTH),
+            state_context,
+            label="Historical target",
+        )
+        ax1.plot(
+            np.arange(CONTEXT_LENGTH, TOTAL_LENGTH),
+            state_actual,
+            label="Actual future target",
+        )
+        ax1.axvline(CONTEXT_LENGTH, linestyle="--", label="Forecast origin")
+        ax1.set_ylabel("Target")
+        ax1.legend()
+
+        ax2.step(
+            np.arange(CONTEXT_LENGTH),
+            machine_state[:CONTEXT_LENGTH],
+            where="post",
+            label="Historical operating state",
+        )
+        ax2.set_xlabel("Hour")
+        ax2.set_ylabel("State (0/1)")
+        ax2.legend()
+
+        fig.tight_layout()
+        return fig
+
+
+    _()
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Compare the forecasts
+    """)
+    return
+
+
+@app.cell
+def _(HORIZON, forecaster, past_state_codes, state_actual, state_context):
+    # Target-only forecast.
+    state_forecast_baseline = forecaster.forecast(
+        state_context,
+        prediction_length=HORIZON,
+    )
+
+    # Target + historical categorical covariate.
+    state_forecast_cat = forecaster.forecast(
+        state_context,
+        prediction_length=HORIZON,
+        categorical_past_covariates=past_state_codes,
+    )
+
+    state_comparison = pd.DataFrame(
+        [
+            {
+                "Approach": "Target only",
+                **evaluate_scenario(
+                    state_context,
+                    state_actual,
+                    state_forecast_baseline,
+                ),
+            },
+            {
+                "Approach": "Target + past operating state",
+                **evaluate_scenario(
+                    state_context,
+                    state_actual,
+                    state_forecast_cat,
+                ),
+            },
+        ]
+    ).set_index("Approach")
+
+    state_comparison.round(4)
+    return
+
+
 @app.cell
 def _():
     return
