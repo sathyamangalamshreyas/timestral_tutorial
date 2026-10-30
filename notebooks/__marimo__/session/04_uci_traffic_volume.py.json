@@ -1,0 +1,67 @@
+{
+  "version": "1",
+  "metadata": {
+    "marimo_version": "0.25.2",
+    "script_metadata_hash": null
+  },
+  "cells": [
+    {
+      "id": "setup",
+      "code_hash": "a30bc0b8f8c0edb3c2569c6765931227",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/plain": ""
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "Hbol",
+      "code_hash": "585be0b0ba4f3a48753040c8bcb5e6db",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><h3 id=\"load-the-dataset\">Load the Dataset</h3></span>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "MJUe",
+      "code_hash": "36a106e2f4cb6812ea0a75b95e867170",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/html": "<marimo-ui-element object-id='MJUe-0' random-id='319a977c-ba43-b426-5106-41815f0f688f'><marimo-table data-initial-value='[]' data-label='null' data-data='&quot;[{&#92;&quot;holiday&#92;&quot;:NaN,&#92;&quot;temp&#92;&quot;:288.28,&#92;&quot;rain_1h&#92;&quot;:0.0,&#92;&quot;snow_1h&#92;&quot;:0.0,&#92;&quot;clouds_all&#92;&quot;:40,&#92;&quot;weather_main&#92;&quot;:&#92;&quot;Clouds&#92;&quot;,&#92;&quot;weather_description&#92;&quot;:&#92;&quot;scattered clouds&#92;&quot;,&#92;&quot;date_time&#92;&quot;:&#92;&quot;2012-10-02 09:00:00&#92;&quot;,&#92;&quot;traffic_volume&#92;&quot;:5545},{&#92;&quot;holiday&#92;&quot;:NaN,&#92;&quot;temp&#92;&quot;:289.36,&#92;&quot;rain_1h&#92;&quot;:0.0,&#92;&quot;snow_1h&#92;&quot;:0.0,&#92;&quot;clouds_all&#92;&quot;:75,&#92;&quot;weather_main&#92;&quot;:&#92;&quot;Clouds&#92;&quot;,&#92;&quot;weather_description&#92;&quot;:&#92;&quot;broken clouds&#92;&quot;,&#92;&quot;date_time&#92;&quot;:&#92;&quot;2012-10-02 10:00:00&#92;&quot;,&#92;&quot;traffic_volume&#92;&quot;:4516},{&#92;&quot;holiday&#92;&quot;:NaN,&#92;&quot;temp&#92;&quot;:289.58,&#92;&quot;rain_1h&#92;&quot;:0.0,&#92;&quot;snow_1h&#92;&quot;:0.0,&#92;&quot;clouds_all&#92;&quot;:90,&#92;&quot;weather_main&#92;&quot;:&#92;&quot;Clouds&#92;&quot;,&#92;&quot;weather_description&#92;&quot;:&#92;&quot;overcast clouds&#92;&quot;,&#92;&quot;date_time&#92;&quot;:&#92;&quot;2012-10-02 11:00:00&#92;&quot;,&#92;&quot;traffic_volume&#92;&quot;:4767},{&#92;&quot;holiday&#92;&quot;:NaN,&#92;&quot;temp&#92;&quot;:290.13,&#92;&quot;rain_1h&#92;&quot;:0.0,&#92;&quot;snow_1h&#92;&quot;:0.0,&#92;&quot;clouds_all&#92;&quot;:90,&#92;&quot;weather_main&#92;&quot;:&#92;&quot;Clouds&#92;&quot;,&#92;&quot;weather_description&#92;&quot;:&#92;&quot;overcast clouds&#92;&quot;,&#92;&quot;date_time&#92;&quot;:&#92;&quot;2012-10-02 12:00:00&#92;&quot;,&#92;&quot;traffic_volume&#92;&quot;:5026},{&#92;&quot;holiday&#92;&quot;:NaN,&#92;&quot;temp&#92;&quot;:291.14,&#92;&quot;rain_1h&#92;&quot;:0.0,&#92;&quot;snow_1h&#92;&quot;:0.0,&#92;&quot;clouds_all&#92;&quot;:75,&#92;&quot;weather_main&#92;&quot;:&#92;&quot;Clouds&#92;&quot;,&#92;&quot;weather_description&#92;&quot;:&#92;&quot;broken clouds&#92;&quot;,&#92;&quot;date_time&#92;&quot;:&#92;&quot;2012-10-02 13:00:00&#92;&quot;,&#92;&quot;traffic_volume&#92;&quot;:4918}]&quot;' data-total-rows='5' data-total-columns='9' data-max-columns='50' data-banner-text='&quot;&quot;' data-pagination='false' data-page-size='10' data-field-types='[[&quot;holiday&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;temp&quot;,[&quot;number&quot;,&quot;float64&quot;]],[&quot;rain_1h&quot;,[&quot;number&quot;,&quot;float64&quot;]],[&quot;snow_1h&quot;,[&quot;number&quot;,&quot;float64&quot;]],[&quot;clouds_all&quot;,[&quot;integer&quot;,&quot;int64&quot;]],[&quot;weather_main&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;weather_description&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;date_time&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;traffic_volume&quot;,[&quot;integer&quot;,&quot;int64&quot;]]]' data-show-filters='true' data-show-download='true' data-show-search='true' data-show-column-summaries='false' data-show-data-types='true' data-show-page-size-selector='false' data-show-column-explorer='true' data-show-chart-builder='true' data-row-headers='[]' data-hidden-columns='[]' data-has-stable-row-id='false' data-lazy='false' data-preload='false'></marimo-table></marimo-ui-element>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "vblA",
+      "code_hash": "2996d63cb44e2da7fd510db5a2b95435",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/plain": ""
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "pvAi",
+      "code_hash": null,
+      "outputs": [],
+      "console": []
+    }
+  ]
+}
