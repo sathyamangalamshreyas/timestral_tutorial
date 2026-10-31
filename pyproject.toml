@@ -12,3 +12,4 @@ dependencies = [
 
 [tool.uv.sources]
 timestral = { git = "https://github.com/mistralai/timestral.git" }
+

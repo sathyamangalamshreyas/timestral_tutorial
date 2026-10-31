@@ -1,0 +1,11 @@
+[project]
+name = "profiling"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fg-data-profiling>=4.20.0",
+    "marimo>=0.25.2",
+    "pandas<3",
+    "pygwalker>=0.5.0.1",
+    "skimpy>=0.0.22",
+]
