@@ -5,3 +5,4 @@ __pycache__/
 .marimo.toml
 data/
 traffic_df_raw.csv
+notes.txt
