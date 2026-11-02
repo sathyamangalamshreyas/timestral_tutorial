@@ -13,6 +13,31 @@ with app.setup:
 
     from ucimlrepo import fetch_ucirepo
 
+    from statsforecast import StatsForecast
+    from statsforecast.models import (
+        Naive,
+        HistoricAverage,
+        WindowAverage,
+        SeasonalNaive,
+        SeasonalWindowAverage,
+    )
+    from statsmodels.tsa.seasonal import seasonal_decompose
+
+    from utilsforecast.plotting import plot_series
+    from utilsforecast.evaluation import evaluate
+    from utilsforecast.losses import (
+        mae,
+        rmse,
+        mape,
+        smape,
+        mase,
+        wape,
+        quantile_loss,
+        mqloss,
+        coverage,
+        winkler_score,
+    )
+
     from timestral import TimestralForecaster
 
 
@@ -384,6 +409,18 @@ def inspect_traffic_cleaning_v2(
 
     work_local = frame_arg.copy()
 
+    # Explicitly convert timestamps to pandas datetime.
+    work_local["date_time"] = pd.to_datetime(
+        work_local["date_time"],
+        errors="coerce",
+    )
+    
+    # Validate timestamp conversion.
+    if work_local["date_time"].isna().any():
+        raise ValueError(
+            "Invalid or missing timestamps found in date_time."
+        )
+    
     work_local = work_local.sort_values(
         "date_time"
     ).reset_index(drop=True)
@@ -580,7 +617,18 @@ def inspect_traffic_cleaning_v2(
 
 
 @app.cell
+def _(traffic_target_segment_v2):
+    print(type(traffic_target_segment_v2))
+    print(traffic_target_segment_v2.dtype)
+    print(type(traffic_target_segment_v2.index))
+    print(traffic_target_segment_v2.index.dtype)
+    return
+
+
+@app.cell
 def _(traffic_df_raw):
+
+
     (
         traffic_conflicts_v2,
         traffic_numeric_examples_v2,
@@ -1168,6 +1216,852 @@ def _(traffic_weekly_metadata_v1):
 @app.cell
 def _(traffic_weekly_comparison_v1):
     traffic_weekly_comparison_v1.round(4)
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    ### Identify contiguous traffic runs
+    """)
+    return
+
+
+@app.function
+def inspect_contiguous_traffic_runs_v1(
+    series_arg,
+    horizon_arg=24,
+):
+    """Find the latest clean training suffix and longest historical run."""
+
+    ordered_local = series_arg.sort_index()
+
+    values_local = ordered_local.to_numpy(dtype=float)
+
+    if len(values_local) <= horizon_arg:
+        raise ValueError("Insufficient observations.")
+
+    actual_local = values_local[-horizon_arg:]
+
+    if not np.isfinite(actual_local).all():
+        raise ValueError("Final test horizon contains missing values.")
+
+    context_local = values_local[:-horizon_arg]
+
+    # Find the start of the latest uninterrupted training suffix.
+    missing_positions_local = np.flatnonzero(
+        ~np.isfinite(context_local)
+    )
+
+    suffix_start_local = (
+        int(missing_positions_local[-1] + 1)
+        if len(missing_positions_local)
+        else 0
+    )
+
+    clean_suffix_local = ordered_local.iloc[
+        suffix_start_local:-horizon_arg
+    ].copy()
+
+    # Identify every complete historical run.
+    valid_mask_local = np.isfinite(context_local)
+
+    padded_local = np.r_[
+        False,
+        valid_mask_local,
+        False,
+    ].astype(np.int8)
+
+    transitions_local = np.diff(padded_local)
+
+    starts_local = np.flatnonzero(transitions_local == 1)
+    ends_local = np.flatnonzero(transitions_local == -1)
+
+    lengths_local = ends_local - starts_local
+
+    if len(lengths_local) == 0:
+        raise ValueError("No complete historical segment found.")
+
+    longest_idx_local = int(np.argmax(lengths_local))
+
+    longest_start_local = starts_local[longest_idx_local]
+    longest_end_local = ends_local[longest_idx_local]
+
+    longest_run_local = ordered_local.iloc[
+        longest_start_local:longest_end_local
+    ].copy()
+
+    metadata_local = pd.DataFrame({
+        "Metric": [
+            "Forecast start",
+            "Forecast end",
+            "Latest clean training suffix start",
+            "Latest clean training suffix end",
+            "Latest clean training suffix length",
+            "Longest historical run start",
+            "Longest historical run end",
+            "Longest historical run length",
+            "Minimum history for 4 weekly seasonal cycles",
+        ],
+        "Value": [
+            ordered_local.index[-horizon_arg],
+            ordered_local.index[-1],
+            clean_suffix_local.index[0] if len(clean_suffix_local) else None,
+            clean_suffix_local.index[-1] if len(clean_suffix_local) else None,
+            len(clean_suffix_local),
+            longest_run_local.index[0],
+            longest_run_local.index[-1],
+            len(longest_run_local),
+            4 * 168,
+        ],
+    })
+
+    return metadata_local, clean_suffix_local, longest_run_local
+
+
+@app.cell
+def _(traffic_target_segment_v2):
+    (
+        traffic_run_metadata_v1,
+        traffic_clean_suffix_v1,
+        traffic_longest_run_v1,
+    ) = inspect_contiguous_traffic_runs_v1(
+        traffic_target_segment_v2,
+        horizon_arg=24,
+    )
+    return traffic_clean_suffix_v1, traffic_run_metadata_v1
+
+
+@app.cell
+def _(traffic_run_metadata_v1):
+    traffic_run_metadata_v1
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    ### Decompose the traffic series
+    """)
+    return
+
+
+@app.function
+def diagnose_traffic_spacing_v1(series_arg):
+    """Inspect timestamp spacing in a traffic series."""
+
+    series_local = series_arg.sort_index()
+    index_local = series_local.index
+
+    if not isinstance(index_local, pd.DatetimeIndex):
+        raise TypeError("Expected a DatetimeIndex.")
+
+    differences_local = np.diff(index_local.asi8)
+
+    expected_local = pd.Timedelta(hours=1)
+    
+    irregular_mask_local = (
+        differences_local != expected_local
+    )
+    
+    invalid_positions_local = np.flatnonzero(
+        irregular_mask_local
+    )
+    
+    # Count actual unique time differences.
+    difference_counts_local = (
+        pd.Series(differences_local)
+        .value_counts()
+        .rename_axis("Time difference")
+        .reset_index(name="Count")
+    )
+
+    irregular_rows_local = []
+
+    for position_local in invalid_positions_local[:20]:
+        irregular_rows_local.append({
+            "Previous timestamp": index_local[position_local],
+            "Next timestamp": index_local[position_local + 1],
+            "Observed difference": (
+                index_local[position_local + 1]
+                - index_local[position_local]
+            ),
+        })
+
+    spacing_summary_local = pd.DataFrame({
+        "Metric": [
+            "Number of observations",
+            "Index type",
+            "Index frequency attribute",
+            "Start timestamp",
+            "End timestamp",
+            "Number of irregular intervals",
+            "Unique timestamp differences",
+        ],
+        "Value": [
+            len(series_local),
+            type(index_local).__name__,
+            str(index_local.freq),
+            index_local.min(),
+            index_local.max(),
+            len(invalid_positions_local),
+            difference_counts_local["Time difference"].nunique(),
+        ],
+    })
+
+    irregular_details_local = pd.DataFrame(
+        irregular_rows_local
+    )
+
+    return spacing_summary_local, irregular_details_local
+
+
+@app.cell
+def _(traffic_clean_suffix_v1):
+    (
+        traffic_spacing_summary_v1,
+        traffic_spacing_details_v1,
+    ) = diagnose_traffic_spacing_v1(
+        traffic_clean_suffix_v1
+    )
+    return traffic_spacing_details_v1, traffic_spacing_summary_v1
+
+
+@app.cell
+def _(traffic_spacing_summary_v1):
+    traffic_spacing_summary_v1
+    return
+
+
+@app.cell
+def _(traffic_spacing_details_v1):
+    traffic_spacing_details_v1
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    ### Acutal decompositiion function
+    """)
+    return
+
+
+@app.function
+def decompose_traffic_series_v1(
+    series_arg,
+    period_arg,
+    model_arg="additive",
+):
+    """Decompose a complete, regularly sampled hourly series."""
+
+    series_local = series_arg.sort_index()
+
+    if not isinstance(series_local.index, pd.DatetimeIndex):
+        raise TypeError("Expected a DatetimeIndex.")
+
+    if len(series_local) < 2 * period_arg:
+        raise ValueError("At least two complete cycles are required.")
+
+    values_local = series_local.to_numpy(dtype=float)
+
+    if not np.isfinite(values_local).all():
+        raise ValueError(
+            "Decomposition requires complete observations. "
+            "Missing values were found."
+        )
+
+    hourly_gap_local = (
+        series_local.index[1:] - series_local.index[:-1]
+    )
+    
+    if not np.all(
+        hourly_gap_local == pd.Timedelta(hours=1)
+    ):
+        raise ValueError("Series must have regular hourly spacing.")
+
+    return seasonal_decompose(
+        series_local,
+        model=model_arg,
+        period=period_arg,
+        extrapolate_trend="period",
+    )
+
+
+@app.cell
+def _(traffic_clean_suffix_v1):
+    traffic_decomposition_daily_v1 = decompose_traffic_series_v1(
+        traffic_clean_suffix_v1,
+        period_arg=24,
+    )
+
+    traffic_decomposition_weekly_v1 = decompose_traffic_series_v1(
+        traffic_clean_suffix_v1,
+        period_arg=168,
+    )
+    return traffic_decomposition_daily_v1, traffic_decomposition_weekly_v1
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    ### Decomposition helper function
+    """)
+    return
+
+
+@app.function
+def plot_traffic_decomposition_v1(
+    result_arg,
+    title_arg,
+):
+    """Plot observed, trend, seasonal and residual components."""
+
+    fig_local = result_arg.plot()
+
+    fig_local.set_size_inches(14, 9)
+    fig_local.suptitle(title_arg, fontsize=14, y=1.01)
+    fig_local.tight_layout()
+
+    return fig_local
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Daily Decomposition
+    """)
+    return
+
+
+@app.cell
+def _(traffic_decomposition_daily_v1):
+    plot_traffic_decomposition_v1(
+        traffic_decomposition_daily_v1,
+        "Traffic volume — daily decomposition",
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Weekly Decomposition
+    """)
+    return
+
+
+@app.cell
+def _(traffic_decomposition_weekly_v1):
+    plot_traffic_decomposition_v1(
+        traffic_decomposition_weekly_v1,
+        "Traffic volume — weekly decomposition",
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Build statistical forecasting baselines
+    """)
+    return
+
+
+@app.function
+def prepare_traffic_nixtla_data_v1(
+    train_series_arg,
+    full_series_arg,
+    horizon_arg=24,
+):
+    """
+    Prepare clean StatsForecast training and test DataFrames
+    """
+
+    train_local = train_series_arg.sort_index()
+    full_local = full_series_arg.sort_index()
+
+    if train_local.isna().any():
+        raise ValueError("StatsForecast training data contains missing values.")
+
+    if train_local.index.has_duplicates:
+        raise ValueError("Duplicate training timestamps found.")
+
+    train_gaps_local = (
+        train_local.index[1:] - train_local.index[:-1]
+    )
+
+    if not np.all(
+        train_gaps_local == pd.Timedelta(hours=1)
+    ):
+        raise ValueError("Series must have regular hourly spacing.")
+
+    test_local = full_local.iloc[-horizon_arg:]
+
+    if len(test_local) != horizon_arg:
+        raise ValueError("Incorrect test horizon length")
+
+    if not np.isfinite(test_local.to_numpy(dtype=float)).all():
+        raise ValueError("Test observations contains missing values.")
+
+    if (
+        train_local.index[-1] + pd.Timedelta(hours=1)
+        != test_local.index[0]
+    ):
+        raise ValueError(
+            "Training and test periods are not contiguous."
+        )
+
+    train_df_local = pd.DataFrame({
+        "unique_id": "I94",
+        "ds": train_local.index,
+        "y": train_local.to_numpy(dtype=float),
+    })
+
+    test_df_local = pd.DataFrame({
+        "unique_id": "I94",
+        "ds": test_local.index,
+        "y": test_local.to_numpy(dtype=float),
+    })
+
+    metadata_local = pd.DataFrame({
+        "Metric": [
+            "Training start",
+            "Training end",
+            "Training observations",
+            "Test start",
+            "Test end",
+            "Test observations",
+        ],
+        "Values": [
+            train_local.index[0],
+            train_local.index[-1],
+            len(train_local),
+            test_local.index[0],
+            test_local.index[-1],
+            len(test_local),
+        ],
+    })
+
+    return train_df_local, test_df_local, metadata_local
+
+
+@app.cell
+def _(traffic_clean_suffix_v1, traffic_target_segment_v2):
+    (
+        traffic_sf_train_v1,
+        traffic_sf_test_v1,
+        traffic_sf_metadata_v1,
+    ) = prepare_traffic_nixtla_data_v1(
+        traffic_clean_suffix_v1,
+        traffic_target_segment_v2,
+        horizon_arg=24,
+    )
+    return traffic_sf_metadata_v1, traffic_sf_test_v1, traffic_sf_train_v1
+
+
+@app.cell
+def _(traffic_sf_metadata_v1):
+    traffic_sf_metadata_v1
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    ### Define the StatsForecast models
+    """)
+    return
+
+
+@app.function
+def run_traffic_statsforecast_v1(
+    train_df_arg,
+    horizon_arg=24,
+):
+    """
+    Fit statistical baseline models and generate forecasts
+    """
+
+    models_local = [
+        Naive(alias="Naive"),
+
+        HistoricAverage(alias="HistoricAverage"),
+
+        WindowAverage(
+            window_size=24,
+            alias="WindowAverage=24",
+        ),
+
+        SeasonalNaive(
+            season_length=24,
+            alias="SeasonalNaive-24",
+        ),
+
+        SeasonalNaive(
+            season_length=164,
+            alias="SeasonalNaive-168",
+        ),
+
+        SeasonalWindowAverage(
+            season_length=24,
+            window_size=7,
+            alias="SeasonalWindowAverage-24-7",
+        ),
+
+        SeasonalWindowAverage(
+            season_length=168,
+            window_size=4,
+            alias="SeasonalWindowAverage-168-4",
+        ),
+    ]
+
+    statsforecast_local = StatsForecast(
+        models=models_local,
+        freq="h",
+        n_jobs=1,
+    )
+
+    statsforecast_local.fit(df=train_df_arg)
+
+    forecasts_local = statsforecast_local.predict(
+        h=horizon_arg,
+    )
+
+    return forecasts_local
+
+
+@app.cell
+def _(traffic_sf_train_v1):
+    traffic_statsforecast_forecasts_v1 = (
+        run_traffic_statsforecast_v1(
+            traffic_sf_train_v1,
+            horizon_arg=24,
+        )
+    )
+    return (traffic_statsforecast_forecasts_v1,)
+
+
+@app.cell
+def _(traffic_statsforecast_forecasts_v1):
+    traffic_statsforecast_forecasts_v1.round(3)
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Generate a fair Timestral forecast
+    """)
+    return
+
+
+@app.function
+def run_traffic_timestral_clean_v1(
+    train_df_arg,
+    test_df_arg,
+    forecaster_arg,
+):
+    """
+    Generate a Timestral forecast using the clean training suffix
+    """
+
+    context_local = train_df_arg["y"].to_numpy(
+        dtype=np.float32
+    )
+
+    horizon_local = len(test_df_arg)
+
+    forecast_local = forecaster_arg.forecast(
+        context_local,
+        prediction_length=horizon_local,
+    )
+
+    median_local = (
+        forecast_local.median[0, 0]
+        .detach()
+        .cpu()
+        .numpy()
+    )
+
+    lower_local = (
+        forecast_local.quantile(0.1)[0, 0]
+        .detach()
+        .cpu()
+        .numpy()
+    )
+
+    upper_local = (
+        forecast_local.quantile(0.9)[0, 0]
+        .detach()
+        .cpu()
+        .numpy()
+    )
+
+    predictions_local = pd.DataFrame({
+        "unique_id": test_df_arg["unique_id"].to_numpy(),
+        "ds": test_df_arg["ds"].to_numpy(),
+        "Timestral-clean": median_local,
+        "Timestral-clean-lo-80": lower_local,
+        "Timestral-clean-hi-80": upper_local,
+    })
+
+    return predictions_local
+
+
+@app.cell
+def _(traffic_forecaster_v1, traffic_sf_test_v1, traffic_sf_train_v1):
+    traffic_timestral_clean_forecast_v1 = (
+        run_traffic_timestral_clean_v1(
+            traffic_sf_train_v1,
+            traffic_sf_test_v1,
+            traffic_forecaster_v1,
+        )
+    )
+    return (traffic_timestral_clean_forecast_v1,)
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Evaluate everything using UtilsForecast
+
+    Combine the statistical forecasts and Timestral predictions
+    """)
+    return
+
+
+@app.cell
+def _(traffic_statsforecast_forecasts_v1, traffic_timestral_clean_forecast_v1):
+    traffic_all_forecasts_v1 = (
+        traffic_statsforecast_forecasts_v1.merge(
+            traffic_timestral_clean_forecast_v1,
+            on=["unique_id", "ds"],
+            validate="one_to_one",
+        )
+    )
+    return (traffic_all_forecasts_v1,)
+
+
+@app.cell
+def _(traffic_all_forecasts_v1, traffic_sf_test_v1):
+    # Prepare the evaluation dataframe
+
+    traffic_evaluation_df_v1 = (
+        traffic_sf_test_v1.merge(
+            traffic_all_forecasts_v1,
+            on=["unique_id", "ds"],
+            validate="one_to_one",
+        )
+    )
+
+    traffic_model_names_v1 = [
+        column
+        for column in traffic_all_forecasts_v1.columns
+        if column not in ["unique_id", "ds"]
+    ]
+
+    print(f"Models being evaluated: {traffic_model_names_v1}")
+    print(f"\nEvaluation observations: {len(traffic_evaluation_df_v1)}")
+    return traffic_evaluation_df_v1, traffic_model_names_v1
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Run UtilsForecast
+    """)
+    return
+
+
+@app.cell
+def _(traffic_evaluation_df_v1, traffic_model_names_v1, traffic_sf_train_v1):
+    traffic_point_metrics_v1 = evaluate(
+        df=traffic_evaluation_df_v1,
+        models=traffic_model_names_v1,
+        metrics=[
+            mae,
+            rmse,
+            mape,
+            smape,
+            wape,
+        ],
+    )
+
+    traffic_mase_metrics_v1 = mase(
+        df=traffic_evaluation_df_v1,
+        models=traffic_model_names_v1,
+        seasonality=24,
+        train_df=traffic_sf_train_v1,
+    )
+    return traffic_mase_metrics_v1, traffic_point_metrics_v1
+
+
+@app.cell
+def _(traffic_point_metrics_v1):
+    # Results
+
+    traffic_point_metrics_v1.round(3)
+    return
+
+
+@app.cell
+def _(traffic_mase_metrics_v1):
+    # Display seasonal results
+    traffic_mase_metrics_v1.round(3)
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    ### Visualize the competing forecasts
+    """)
+    return
+
+
+@app.cell
+def _(traffic_all_forecasts_v1, traffic_sf_train_v1):
+    plot_series(
+        df=traffic_sf_train_v1,
+        forecasts_df=traffic_all_forecasts_v1,
+        ids=["I94"],
+        models=[
+            "Timestral-clean",
+            "Naive",
+            "SeasonalNaive-24",
+            "SeasonalNaive-168",
+            "SeasonalWindowAverage-24-7",
+            "SeasonalWindowAverage-168-4",
+        ],
+        plot_random=False,
+        max_insample_length=24 * 7,
+        engine="matplotlib",
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Exclude the lower and upper quantile bounds
+    """)
+    return
+
+
+@app.cell
+def _(traffic_all_forecasts_v1):
+    traffic_point_models_v2 = [
+        column
+        for column in traffic_all_forecasts_v1.columns
+        if column not in ["unique_id", "ds"]
+        and not column.endswith("-lo-80")
+        and not column.endswith("-hi-80")
+    ]
+
+    print("Point forecasting models:")
+    print(traffic_point_models_v2)
+    return (traffic_point_models_v2,)
+
+
+@app.cell
+def _(traffic_evaluation_df_v1, traffic_point_models_v2, traffic_sf_train_v1):
+    traffic_point_metrics_v2 = evaluate(
+        df=traffic_evaluation_df_v1,
+        models=traffic_point_models_v2,
+        metrics=[
+            mae,
+            rmse,
+            mape,
+            smape,
+            wape,
+        ],
+    )
+
+    traffic_mase_metrics_v2 = mase(
+        df=traffic_evaluation_df_v1,
+        models=traffic_point_models_v2,
+        seasonality=24,
+        train_df=traffic_sf_train_v1,
+    )
+    return traffic_mase_metrics_v2, traffic_point_metrics_v2
+
+
+@app.cell
+def _(traffic_point_metrics_v2):
+    traffic_point_metrics_v2.round(4)
+    return
+
+
+@app.cell
+def _(traffic_mase_metrics_v2):
+    traffic_mase_metrics_v2.round(4)
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Evaluate Timestral's prediction interval separately
+    """)
+    return
+
+
+@app.function
+def evaluate_traffic_interval_v1(
+    evaluation_df_arg,
+    lower_col_arg,
+    upper_col_arg,
+):
+    """Evaluate an 80% prediction interval."""
+
+    frame_local = evaluation_df_arg.copy()
+
+    valid_local = (
+        frame_local["y"].notna()
+        & frame_local[lower_col_arg].notna()
+        & frame_local[upper_col_arg].notna()
+    )
+
+    actual_local = frame_local.loc[
+        valid_local, "y"
+    ].to_numpy()
+
+    lower_local = frame_local.loc[
+        valid_local, lower_col_arg
+    ].to_numpy()
+
+    upper_local = frame_local.loc[
+        valid_local, upper_col_arg
+    ].to_numpy()
+
+    if np.any(lower_local > upper_local):
+        raise ValueError("Lower interval exceeds upper interval.")
+
+    return pd.DataFrame({
+        "Metric": [
+            "Evaluation observations",
+            "80% interval coverage (%)",
+            "Mean interval width",
+        ],
+        "Value": [
+            len(actual_local),
+            np.mean(
+                (actual_local >= lower_local)
+                & (actual_local <= upper_local)
+            ) * 100,
+            np.mean(upper_local - lower_local),
+        ],
+    })
+
+
+@app.cell
+def _(traffic_evaluation_df_v1):
+    traffic_interval_metrics_v1 = evaluate_traffic_interval_v1(
+        traffic_evaluation_df_v1,
+        "Timestral-clean-lo-80",
+        "Timestral-clean-hi-80",
+    )
     return
 
 
