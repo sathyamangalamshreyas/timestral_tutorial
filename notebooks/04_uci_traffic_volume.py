@@ -38,6 +38,8 @@ with app.setup:
         winkler_score,
     )
 
+    from sklearn.preprocessing import OneHotEncoder
+
     from timestral import TimestralForecaster
 
 
@@ -3257,6 +3259,2464 @@ def _(traffic_horizon_interval_plot_data_v2, traffic_horizon_stats_train_v1):
     )
 
     traffic_horizon_interval_fig_v2
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Lead-time uncertainty analysis
+    """)
+    return
+
+
+@app.function
+def evaluate_traffic_lead_uncertainty_v2(
+    actual_arg,
+    quantiles_arg,
+    levels_arg,
+):
+    """Evaluate probabilistic forecasts by individual lead-time bands."""
+
+    actual_local = np.asarray(actual_arg, dtype=float)
+    levels_local = np.asarray(levels_arg, dtype=float)
+
+    bands_local = [
+        ("Hours 1-24", 0, 24),
+        ("Hours 25-48", 24, 48),
+        ("Hours 49-72", 48, 72),
+        ("Hours 73-168", 72, 168),
+        ("Hours 169-192", 168, 192),
+    ]
+
+    q10_idx_local = np.where(
+        np.isclose(levels_local, 0.1)
+    )[0][0]
+
+    q90_idx_local = np.where(
+        np.isclose(levels_local, 0.9)
+    )[0][0]
+
+    rows_local = []
+
+    for model_name_local, quantile_matrix_local in (
+        quantiles_arg.items()
+    ):
+
+        quantile_matrix_local = np.asarray(
+            quantile_matrix_local,
+            dtype=float,
+        )
+
+        if quantile_matrix_local.shape != (
+            len(actual_local),
+            len(levels_local),
+        ):
+            raise ValueError(
+                f"Unexpected quantile shape for {model_name_local}."
+            )
+
+        for band_name_local, start_local, end_local in bands_local:
+
+            y_local = actual_local[start_local:end_local]
+
+            q_local = quantile_matrix_local[
+                start_local:end_local
+            ]
+
+            valid_local = np.isfinite(y_local)
+
+            y_valid_local = y_local[valid_local]
+            q_valid_local = q_local[valid_local]
+
+            if len(y_valid_local) == 0:
+                continue
+
+            lower_local = q_valid_local[:, q10_idx_local]
+            upper_local = q_valid_local[:, q90_idx_local]
+
+            # Empirical 80% interval coverage.
+            coverage_local = np.mean(
+                (y_valid_local >= lower_local)
+                & (y_valid_local <= upper_local)
+            ) * 100
+
+            # Average width of the central 80% interval.
+            width_local = np.mean(
+                upper_local - lower_local
+            )
+
+            # Pinball loss across all 21 quantiles.
+            errors_local = (
+                y_valid_local[:, None] - q_valid_local
+            )
+
+            pinball_local = np.maximum(
+                levels_local[None, :] * errors_local,
+                (levels_local[None, :] - 1) * errors_local,
+            ).mean()
+
+            # Calibration diagnostic across all quantiles.
+            empirical_quantile_coverage_local = np.mean(
+                y_valid_local[:, None] <= q_valid_local,
+                axis=0,
+            )
+
+            calibration_gap_local = np.mean(
+                np.abs(
+                    empirical_quantile_coverage_local
+                    - levels_local
+                )
+            ) * 100
+
+            rows_local.append({
+                "Approach": model_name_local,
+                "Lead-time band": band_name_local,
+                "Valid observations": len(y_valid_local),
+                "80% coverage (%)": coverage_local,
+                "80% interval width": width_local,
+                "Mean pinball loss": pinball_local,
+                "Mean quantile calibration error (pp)": (
+                    calibration_gap_local
+                ),
+            })
+
+    return pd.DataFrame(rows_local)
+
+
+@app.cell
+def _(
+    traffic_horizon_actual_v1,
+    traffic_horizon_quantile_levels_v1,
+    traffic_horizon_quantiles_v1,
+):
+    traffic_lead_uncertainty_by_band_v2 = (
+        evaluate_traffic_lead_uncertainty_v2(
+            actual_arg=traffic_horizon_actual_v1,
+            quantiles_arg=traffic_horizon_quantiles_v1,
+            levels_arg=traffic_horizon_quantile_levels_v1,
+        )
+    )
+    return (traffic_lead_uncertainty_by_band_v2,)
+
+
+@app.cell
+def _(traffic_lead_uncertainty_by_band_v2):
+    traffic_lead_uncertainty_by_band_v2.round(4)
+    return
+
+
+@app.function
+def plot_traffic_lead_uncertainty_v2(results_arg):
+    """Plot probabilistic forecast metrics by lead-time band."""
+
+    band_order_local = [
+        "Hours 1-24",
+        "Hours 25-48",
+        "Hours 49-72",
+        "Hours 73-168",
+        "Hours 169-192",
+    ]
+
+    metrics_local = [
+        ("80% coverage (%)", "Empirical coverage (%)"),
+        ("80% interval width", "Mean interval width"),
+        ("Mean pinball loss", "Mean pinball loss"),
+    ]
+
+    fig_local, axes_local = plt.subplots(
+        1, 3,
+        figsize=(17, 5),
+    )
+
+    for ax_local, (metric_local, title_local) in zip(
+        axes_local,
+        metrics_local,
+    ):
+        for approach_local, group_local in results_arg.groupby(
+            "Approach"
+        ):
+            group_local = (
+                group_local
+                .set_index("Lead-time band")
+                .reindex(band_order_local)
+            )
+
+            ax_local.plot(
+                band_order_local,
+                group_local[metric_local],
+                marker="o",
+                label=approach_local,
+            )
+
+        ax_local.set_title(title_local)
+        ax_local.tick_params(
+            axis="x",
+            rotation=35,
+        )
+        ax_local.grid(alpha=0.3)
+
+    axes_local[0].axhline(
+        80,
+        linestyle="--",
+        label="Nominal 80%",
+    )
+
+    axes_local[0].legend(fontsize=8)
+    axes_local[1].legend(fontsize=8)
+    axes_local[2].legend(fontsize=8)
+
+    fig_local.tight_layout()
+
+    return fig_local
+
+
+@app.cell
+def _(traffic_lead_uncertainty_by_band_v2):
+    traffic_lead_uncertainty_fig_v2 = (
+        plot_traffic_lead_uncertainty_v2(
+            traffic_lead_uncertainty_by_band_v2
+        )
+    )
+
+    traffic_lead_uncertainty_fig_v2
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Holiday categorical experiments
+    """)
+    return
+
+
+@app.function
+def prepare_traffic_holiday_inputs_v1(
+    raw_frame_arg,
+    target_series_arg,
+    weather_frame_arg,
+    origin_arg="2018-08-28 00:00:00",
+    horizon_arg=168,
+):
+    """Build historical and known-future holiday features."""
+
+    target_local = target_series_arg.sort_index()
+    weather_local = weather_frame_arg.sort_index()
+
+    if not target_local.index.equals(weather_local.index):
+        raise ValueError(
+            "Target and weather indexes do not match."
+        )
+
+    work_local = raw_frame_arg.copy()
+
+    work_local["date_time"] = pd.to_datetime(
+        work_local["date_time"],
+        errors="coerce",
+    )
+
+    work_local = work_local.dropna(
+        subset=["date_time"]
+    )
+
+    work_local["calendar_date"] = (
+        work_local["date_time"].dt.normalize()
+    )
+
+    def resolve_holiday_local(values_arg):
+        names_local = sorted({
+            value.strip()
+            for value in values_arg.dropna().astype(str)
+            if value.strip()
+            and value.strip().lower() not in {"none", "nan"}
+        })
+
+        if len(names_local) > 1:
+            raise ValueError(
+                f"Conflicting holiday names on one date: {names_local}"
+            )
+
+        return names_local[0] if names_local else "No holiday"
+
+    # Resolve one holiday label per calendar date.
+    holiday_by_date_local = (
+        work_local
+        .groupby("calendar_date")["holiday"]
+        .apply(resolve_holiday_local)
+    )
+
+    # Propagate each date's label to every hourly position.
+    hourly_dates_local = pd.Series(
+        target_local.index.normalize(),
+        index=target_local.index,
+    )
+
+    holiday_labels_local = (
+        hourly_dates_local
+        .map(holiday_by_date_local)
+        .fillna("Unknown")
+        .astype(str)
+    )
+
+    # Validate the forecast origin.
+    origin_local = pd.Timestamp(origin_arg)
+
+    if origin_local not in target_local.index:
+        raise ValueError(
+            f"Forecast origin {origin_local} not found."
+        )
+
+    origin_idx_local = target_local.index.get_loc(
+        origin_local
+    )
+
+    end_idx_local = origin_idx_local + horizon_arg
+
+    if end_idx_local > len(target_local):
+        raise ValueError("Insufficient future observations.")
+
+    # Full historical target context.
+    context_local = target_local.iloc[
+        :origin_idx_local
+    ].to_numpy(dtype=np.float32)
+
+    actual_local = target_local.iloc[
+        origin_idx_local:end_idx_local
+    ].to_numpy(dtype=np.float32)
+
+    future_index_local = target_local.index[
+        origin_idx_local:end_idx_local
+    ]
+
+    if len(context_local) > 32768:
+        raise ValueError("Historical context exceeds Timestral's limit.")
+
+    # Historical weather only: no future weather values.
+    weather_columns_local = [
+        "temp",
+        "rain_1h",
+        "snow_1h",
+        "clouds_all",
+    ]
+
+    weather_values_local = (
+        weather_local[weather_columns_local]
+        .iloc[:origin_idx_local]
+        .to_numpy(dtype=np.float32)
+    )
+
+    weather_covariates_local = (
+        weather_values_local.T[None, :, :]
+    )
+
+    # Holiday labels through the end of the forecast horizon.
+    combined_labels_local = holiday_labels_local.iloc[
+        :end_idx_local
+    ].to_numpy(dtype=object)
+
+    historical_labels_local = combined_labels_local[
+        :origin_idx_local
+    ]
+
+    future_labels_local = combined_labels_local[
+        origin_idx_local:end_idx_local
+    ]
+
+    if np.any(future_labels_local == "Unknown"):
+        raise ValueError(
+            "Unknown holiday dates found in forecast horizon."
+        )
+
+    future_named_holidays_local = (
+        set(future_labels_local)
+        - {"No holiday"}
+    )
+
+    if "Labor Day" not in future_named_holidays_local:
+        raise ValueError(
+            "Labor Day was not found in the selected forecast horizon."
+        )
+
+    # ------------------------------------------
+    # Option A: Binary holiday indicator.
+    # ------------------------------------------
+
+    binary_values_local = np.full(
+        len(combined_labels_local),
+        np.nan,
+        dtype=np.float32,
+    )
+
+    known_mask_local = (
+        combined_labels_local != "Unknown"
+    )
+
+    binary_values_local[known_mask_local] = (
+        combined_labels_local[known_mask_local]
+        != "No holiday"
+    ).astype(np.float32)
+
+    binary_covariates_local = (
+        binary_values_local[None, None, :]
+    )
+
+    # ------------------------------------------
+    # Option B and C: Categorical and one-hot.
+    # ------------------------------------------
+
+    # Fit the encoder using historical categories only.
+    known_historical_labels_local = (
+        historical_labels_local[
+            historical_labels_local != "Unknown"
+        ]
+    )
+
+    encoder_local = OneHotEncoder(
+        handle_unknown="ignore",
+        sparse_output=False,
+        dtype=np.float32,
+    )
+
+    encoder_local.fit(
+        known_historical_labels_local.reshape(-1, 1)
+    )
+
+    category_levels_local = (
+        encoder_local.categories_[0]
+    )
+
+    category_map_local = {
+        name: float(idx)
+        for idx, name in enumerate(category_levels_local)
+    }
+
+    # Check future categories were represented in historical data.
+    unseen_future_local = (
+        future_named_holidays_local
+        - set(category_levels_local)
+    )
+
+    if unseen_future_local:
+        raise ValueError(
+            f"Unseen future holiday categories: {unseen_future_local}"
+        )
+
+    # Option B: Numeric category codes.
+    category_codes_local = np.array([
+        category_map_local.get(label, np.nan)
+        for label in combined_labels_local
+    ], dtype=np.float32)
+
+    categorical_covariates_local = (
+        category_codes_local[None, None, :]
+    )
+
+    # Option C: One-hot representation.
+    onehot_values_local = (
+        encoder_local
+        .transform(combined_labels_local.reshape(-1, 1))
+        .astype(np.float32)
+    )
+
+    onehot_covariates_local = (
+        onehot_values_local.T[None, :, :]
+    )
+
+    # Summarise future holiday distribution.
+    future_holiday_summary_local = (
+        pd.Series(future_labels_local)
+        .value_counts()
+        .rename_axis("Holiday category")
+        .reset_index(name="Hours")
+    )
+
+    metadata_local = pd.DataFrame({
+        "Metric": [
+            "Forecast origin",
+            "Forecast end",
+            "Historical context length",
+            "Missing historical target observations",
+            "Missing future target observations",
+            "Weather covariate shape",
+            "Binary holiday shape",
+            "Categorical holiday shape",
+            "One-hot holiday shape",
+            "Number of learned categories",
+        ],
+        "Value": [
+            future_index_local[0],
+            future_index_local[-1],
+            len(context_local),
+            int(np.isnan(context_local).sum()),
+            int(np.isnan(actual_local).sum()),
+            str(weather_covariates_local.shape),
+            str(binary_covariates_local.shape),
+            str(categorical_covariates_local.shape),
+            str(onehot_covariates_local.shape),
+            len(category_levels_local),
+        ],
+    })
+
+    return (
+        context_local,
+        actual_local,
+        future_index_local,
+        weather_covariates_local,
+        binary_covariates_local,
+        categorical_covariates_local,
+        onehot_covariates_local,
+        metadata_local,
+        future_holiday_summary_local,
+        encoder_local,
+    )
+
+
+@app.cell
+def _(traffic_df_raw, traffic_target_segment_v2, traffic_weather_hourly_v1):
+    (
+        traffic_holiday_context_v1,
+        traffic_holiday_actual_v1,
+        traffic_holiday_index_v1,
+        traffic_holiday_weather_v1,
+        traffic_holiday_binary_v1,
+        traffic_holiday_categories_v1,
+        traffic_holiday_onehot_v1,
+        traffic_holiday_metadata_v1,
+        traffic_holiday_summary_v1,
+        traffic_holiday_encoder_v1,
+    ) = prepare_traffic_holiday_inputs_v1(
+        raw_frame_arg=traffic_df_raw,
+        target_series_arg=traffic_target_segment_v2,
+        weather_frame_arg=traffic_weather_hourly_v1,
+        origin_arg="2018-08-28 00:00:00",
+        horizon_arg=168,
+    )
+    return (
+        traffic_holiday_actual_v1,
+        traffic_holiday_binary_v1,
+        traffic_holiday_categories_v1,
+        traffic_holiday_context_v1,
+        traffic_holiday_encoder_v1,
+        traffic_holiday_index_v1,
+        traffic_holiday_metadata_v1,
+        traffic_holiday_onehot_v1,
+        traffic_holiday_summary_v1,
+        traffic_holiday_weather_v1,
+    )
+
+
+@app.cell
+def _(traffic_holiday_metadata_v1):
+    traffic_holiday_metadata_v1
+    return
+
+
+@app.cell
+def _(traffic_holiday_summary_v1):
+    traffic_holiday_summary_v1
+    return
+
+
+@app.cell
+def _(traffic_holiday_encoder_v1):
+    traffic_holiday_encoder_v1.categories_
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Run the holiday forecasting experiments
+    """)
+    return
+
+
+@app.function
+def run_traffic_holiday_forecasts_v1(
+    context_arg,
+    actual_arg,
+    weather_arg,
+    binary_arg,
+    categories_arg,
+    onehot_arg,
+    future_index_arg,
+    forecaster_arg,
+):
+    """Compare target, weather and three holiday representations."""
+
+    horizon_local = len(actual_arg)
+
+    # Five forecasting configurations.
+    forecasts_local = {}
+
+    # 1. Target only.
+    forecasts_local["Target only"] = forecaster_arg.forecast(
+        context_arg,
+        prediction_length=horizon_local,
+    )
+
+    # 2. Target + historical weather.
+    forecasts_local["Target + weather"] = forecaster_arg.forecast(
+        context_arg,
+        prediction_length=horizon_local,
+        past_covariates=weather_arg,
+    )
+
+    # 3. Target + weather + binary holiday.
+    forecasts_local["Weather + binary holiday"] = (
+        forecaster_arg.forecast(
+            context_arg,
+            prediction_length=horizon_local,
+            past_covariates=weather_arg,
+            known_covariates=binary_arg,
+        )
+    )
+
+    # 4. Target + weather + categorical holiday codes.
+    forecasts_local["Weather + categorical holiday"] = (
+        forecaster_arg.forecast(
+            context_arg,
+            prediction_length=horizon_local,
+            past_covariates=weather_arg,
+            categorical_known_covariates=categories_arg,
+        )
+    )
+
+    # 5. Target + weather + one-hot holiday indicators.
+    forecasts_local["Weather + one-hot holiday"] = (
+        forecaster_arg.forecast(
+            context_arg,
+            prediction_length=horizon_local,
+            past_covariates=weather_arg,
+            known_covariates=onehot_arg,
+        )
+    )
+
+    actual_local = np.asarray(actual_arg, dtype=float)
+    valid_local = np.isfinite(actual_local)
+    y_local = actual_local[valid_local]
+
+    # Calculate historical seasonal scaling.
+    seasonal_differences_local = np.abs(
+        context_arg[24:] - context_arg[:-24]
+    )
+
+    seasonal_differences_local = (
+        seasonal_differences_local[
+            np.isfinite(seasonal_differences_local)
+        ]
+    )
+
+    seasonal_scale_local = (
+        seasonal_differences_local.mean()
+        if len(seasonal_differences_local)
+        else np.nan
+    )
+
+    metric_rows_local = []
+    prediction_data_local = {
+        "ds": future_index_arg,
+        "y": actual_local,
+    }
+
+    quantile_data_local = {}
+    quantile_levels_local = None
+
+    for name_local, forecast_local in forecasts_local.items():
+
+        median_local = (
+            forecast_local.median[0, 0]
+            .detach()
+            .cpu()
+            .numpy()
+        )
+
+        quantiles_local = (
+            forecast_local.quantiles[0, 0]
+            .detach()
+            .cpu()
+            .numpy()
+        )
+
+        levels_local = np.asarray(
+            forecast_local.quantile_levels
+        )
+
+        quantile_levels_local = levels_local
+
+        quantile_data_local[name_local] = quantiles_local
+
+        prediction_data_local[name_local] = median_local
+
+        predicted_local = median_local[valid_local]
+
+        errors_local = y_local - predicted_local
+        absolute_errors_local = np.abs(errors_local)
+
+        mae_local = absolute_errors_local.mean()
+
+        rmse_local = np.sqrt(
+            np.mean(errors_local**2)
+        )
+
+        nonzero_local = np.abs(y_local) > 1e-8
+
+        mape_local = (
+            np.mean(
+                absolute_errors_local[nonzero_local]
+                / np.abs(y_local[nonzero_local])
+            ) * 100
+        )
+
+        denominator_local = (
+            np.abs(y_local) + np.abs(predicted_local)
+        )
+
+        smape_local = np.mean(
+            np.divide(
+                200 * absolute_errors_local,
+                denominator_local,
+                out=np.zeros_like(absolute_errors_local),
+                where=denominator_local > 0,
+            )
+        )
+
+        wape_local = (
+            absolute_errors_local.sum()
+            / np.abs(y_local).sum()
+        ) * 100
+
+        mase_local = (
+            mae_local / seasonal_scale_local
+            if seasonal_scale_local > 0
+            else np.nan
+        )
+
+        lower_local = forecast_local.quantile(0.1)[0, 0]
+        upper_local = forecast_local.quantile(0.9)[0, 0]
+
+        lower_local = (
+            lower_local.detach().cpu().numpy()
+        )[valid_local]
+
+        upper_local = (
+            upper_local.detach().cpu().numpy()
+        )[valid_local]
+
+        coverage_local = np.mean(
+            (y_local >= lower_local)
+            & (y_local <= upper_local)
+        ) * 100
+
+        width_local = np.mean(
+            upper_local - lower_local
+        )
+
+        quantile_errors_local = (
+            y_local[:, None]
+            - quantiles_local[valid_local]
+        )
+
+        pinball_local = np.maximum(
+            levels_local[None, :] * quantile_errors_local,
+            (levels_local[None, :] - 1) * quantile_errors_local,
+        ).mean()
+
+        metric_rows_local.append({
+            "Approach": name_local,
+            "Valid observations": len(y_local),
+            "MAE": mae_local,
+            "RMSE": rmse_local,
+            "MAPE (%)": mape_local,
+            "sMAPE (%)": smape_local,
+            "WAPE (%)": wape_local,
+            "MASE": mase_local,
+            "80% coverage (%)": coverage_local,
+            "80% interval width": width_local,
+            "Mean pinball loss": pinball_local,
+        })
+
+    metrics_local = pd.DataFrame(metric_rows_local).set_index(
+        "Approach"
+    )
+
+    predictions_local = pd.DataFrame(prediction_data_local)
+
+    return (
+        metrics_local,
+        predictions_local,
+        quantile_data_local,
+        quantile_levels_local,
+    )
+
+
+@app.cell
+def _(
+    traffic_forecaster_v1,
+    traffic_holiday_actual_v1,
+    traffic_holiday_binary_v1,
+    traffic_holiday_categories_v1,
+    traffic_holiday_context_v1,
+    traffic_holiday_index_v1,
+    traffic_holiday_onehot_v1,
+    traffic_holiday_weather_v1,
+):
+    (
+        traffic_holiday_metrics_v1,
+        traffic_holiday_predictions_v1,
+        traffic_holiday_quantiles_v1,
+        traffic_holiday_quantile_levels_v1,
+    ) = run_traffic_holiday_forecasts_v1(
+        context_arg=traffic_holiday_context_v1,
+        actual_arg=traffic_holiday_actual_v1,
+        weather_arg=traffic_holiday_weather_v1,
+        binary_arg=traffic_holiday_binary_v1,
+        categories_arg=traffic_holiday_categories_v1,
+        onehot_arg=traffic_holiday_onehot_v1,
+        future_index_arg=traffic_holiday_index_v1,
+        forecaster_arg=traffic_forecaster_v1,
+    )
+    return traffic_holiday_metrics_v1, traffic_holiday_predictions_v1
+
+
+@app.cell
+def _(traffic_holiday_metrics_v1):
+    traffic_holiday_metrics_v1.round(4)
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Visualise the holiday forecasts
+    """)
+    return
+
+
+@app.function
+def plot_traffic_holiday_forecasts_v1(
+    predictions_arg,
+):
+    """Plot actual traffic and all holiday forecasting variants."""
+
+    fig_local, ax_local = plt.subplots(
+        figsize=(15, 6)
+    )
+
+    ax_local.plot(
+        predictions_arg["ds"],
+        predictions_arg["y"],
+        label="Actual traffic",
+        linewidth=2,
+    )
+
+    for column_local in predictions_arg.columns:
+        if column_local in ["ds", "y"]:
+            continue
+
+        ax_local.plot(
+            predictions_arg["ds"],
+            predictions_arg[column_local],
+            label=column_local,
+            alpha=0.85,
+        )
+
+    labor_day_start_local = pd.Timestamp(
+        "2018-09-03 00:00"
+    )
+
+    labor_day_end_local = pd.Timestamp(
+        "2018-09-04 00:00"
+    )
+
+    ax_local.axvspan(
+        labor_day_start_local,
+        labor_day_end_local,
+        alpha=0.15,
+        label="Labor Day",
+    )
+
+    ax_local.set(
+        title="Traffic forecasts with different holiday encodings",
+        xlabel="Date",
+        ylabel="Traffic volume",
+    )
+
+    ax_local.legend(fontsize=8)
+    fig_local.autofmt_xdate()
+    fig_local.tight_layout()
+
+    return fig_local
+
+
+@app.cell
+def _(traffic_holiday_predictions_v1):
+    traffic_holiday_fig_v1 = (
+        plot_traffic_holiday_forecasts_v1(
+            traffic_holiday_predictions_v1
+        )
+    )
+
+    traffic_holiday_fig_v1
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Traffic rolling-origin validation with covariates
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    ##### Inspect the holiday inventory
+    """)
+    return
+
+
+@app.function
+def summarize_traffic_holiday_events_v2(
+    raw_frame_arg,
+    target_index_arg,
+):
+    holiday_frame = raw_frame_arg[
+        ["date_time", "holiday"]
+    ].copy()
+
+    holiday_frame["date_time"] = pd.to_datetime(
+        holiday_frame["date_time"],
+        errors="coerce",
+    )
+
+    holiday_frame["holiday"] = (
+        holiday_frame["holiday"]
+        .astype("string")
+        .str.strip()
+        .replace({
+            "": pd.NA,
+            "nan": pd.NA,
+            "none": pd.NA,
+            "null": pd.NA,
+        })
+    )
+
+    holiday_frame = holiday_frame.dropna(
+        subset=["date_time", "holiday"]
+    )
+
+    holiday_frame["calendar_date"] = (
+        holiday_frame["date_time"].dt.normalize()
+    )
+
+    start_date = target_index_arg.min().normalize()
+    end_date = target_index_arg.max().normalize()
+
+    event_dates = (
+        holiday_frame.loc[
+            holiday_frame["calendar_date"].between(
+                start_date,
+                end_date,
+            ),
+            ["calendar_date", "holiday"],
+        ]
+        .drop_duplicates()
+        .sort_values(["calendar_date", "holiday"])
+        .reset_index(drop=True)
+    )
+
+    event_summary = (
+        event_dates.groupby("holiday", as_index=False)
+        .agg(
+            **{
+                "Number of dates": (
+                    "calendar_date",
+                    "nunique",
+                ),
+                "First occurrence": (
+                    "calendar_date",
+                    "min",
+                ),
+                "Last occurrence": (
+                    "calendar_date",
+                    "max",
+                ),
+                "Event dates": (
+                    "calendar_date",
+                    lambda values: ", ".join(
+                        values.dt.strftime("%Y-%m-%d")
+                    ),
+                ),
+            }
+        )
+        .sort_values("holiday")
+        .reset_index(drop=True)
+    )
+
+    return event_dates, event_summary
+
+
+@app.cell
+def _(traffic_df_raw, traffic_target_segment_v2):
+    (
+        traffic_holiday_event_dates_v2,
+        traffic_holiday_event_summary_v2,
+    ) = summarize_traffic_holiday_events_v2(
+        raw_frame_arg=traffic_df_raw,
+        target_index_arg=traffic_target_segment_v2.index,
+    )
+    return traffic_holiday_event_dates_v2, traffic_holiday_event_summary_v2
+
+
+@app.cell
+def _(traffic_holiday_event_summary_v2):
+    traffic_holiday_event_summary_v2
+    return
+
+
+@app.cell
+def _(traffic_holiday_event_dates_v2):
+    traffic_holiday_event_dates_v2
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    ##### Build the rolling-origin schedule
+    """)
+    return
+
+
+@app.function
+def build_traffic_rolling_origin_schedule_v3(
+    target_series_arg,
+    holiday_events_arg,
+    minimum_history_hours_arg=1680,
+    horizon_hours_arg=168,
+    step_hours_arg=24,
+):
+    target = target_series_arg.sort_index()
+
+    if target.index.has_duplicates:
+        raise ValueError("Target index contains duplicate timestamps.")
+
+    if not target.index.is_monotonic_increasing:
+        raise ValueError("Target index must be chronological.")
+
+    if len(target) <= minimum_history_hours_arg:
+        raise ValueError("Insufficient history for the requested minimum.")
+
+    if not (
+        target.index[1:] - target.index[:-1]
+        == pd.Timedelta(hours=1)
+    ).all():
+        raise ValueError("Target index must have an hourly frequency.")
+
+    holiday_events = (
+        holiday_events_arg[
+            ["calendar_date", "holiday"]
+        ]
+        .drop_duplicates()
+        .copy()
+    )
+
+    holiday_events["calendar_date"] = pd.to_datetime(
+        holiday_events["calendar_date"]
+    ).dt.normalize()
+
+    first_origin = (
+        target.index[minimum_history_hours_arg].ceil("D")
+    )
+
+    last_origin = (
+        target.index[-1]
+        - pd.Timedelta(hours=horizon_hours_arg - 1)
+    ).floor("D")
+
+    origins = pd.date_range(
+        start=first_origin,
+        end=last_origin,
+        freq=f"{step_hours_arg}h",
+    )
+
+    schedule_rows = []
+    event_rows = []
+
+    for origin in origins:
+        context = target.loc[target.index < origin]
+
+        future_index = pd.date_range(
+            start=origin,
+            periods=horizon_hours_arg,
+            freq="h",
+        )
+
+        future_actual = target.reindex(future_index)
+
+        if future_index.isin(target.index).sum() != horizon_hours_arg:
+            raise ValueError(
+                f"Incomplete future index at origin {origin}."
+            )
+
+        events_in_window = holiday_events.loc[
+            holiday_events["calendar_date"].between(
+                origin.normalize(),
+                future_index[-1].normalize(),
+            )
+        ]
+
+        for event in events_in_window.itertuples(index=False):
+            days_ahead = (
+                event.calendar_date - origin.normalize()
+            ).days
+
+            event_rows.append({
+                "Forecast origin": origin,
+                "Holiday date": event.calendar_date,
+                "Holiday": event.holiday,
+                "Days ahead": days_ahead,
+                "First lead hour": days_ahead * 24 + 1,
+            })
+
+        schedule_rows.append({
+            "Forecast origin": origin,
+            "Forecast end": future_index[-1],
+            "Historical context length": len(context),
+            "Observed historical targets": int(
+                context.notna().sum()
+            ),
+            "Missing historical targets": int(
+                context.isna().sum()
+            ),
+            "Valid future targets": int(
+                np.isfinite(future_actual.to_numpy()).sum()
+            ),
+            "Holiday dates in horizon": len(events_in_window),
+            "Holiday categories": ", ".join(
+                events_in_window["holiday"].unique()
+            ),
+        })
+
+    schedule = pd.DataFrame(schedule_rows)
+    event_windows = pd.DataFrame(event_rows)
+
+    evaluated_dates = (
+        event_windows["Holiday date"].nunique()
+        if not event_windows.empty
+        else 0
+    )
+
+    summary = pd.DataFrame([
+        {
+            "Metric": "Number of forecast origins",
+            "Value": len(schedule),
+        },
+        {
+            "Metric": "Origin interval (hours)",
+            "Value": step_hours_arg,
+        },
+        {
+            "Metric": "Forecast horizon (hours)",
+            "Value": horizon_hours_arg,
+        },
+        {
+            "Metric": "Minimum historical context (hours)",
+            "Value": minimum_history_hours_arg,
+        },
+        {
+            "Metric": "Unique holiday dates evaluated",
+            "Value": evaluated_dates,
+        },
+        {
+            "Metric": "Holiday event forecast instances",
+            "Value": len(event_windows),
+        },
+        {
+            "Metric": "Holiday categories represented",
+            "Value": (
+                event_windows["Holiday"].nunique()
+                if not event_windows.empty
+                else 0
+            ),
+        },
+    ])
+
+    return schedule, event_windows, summary
+
+
+@app.cell
+def _(traffic_holiday_event_dates_v2, traffic_target_segment_v2):
+    (
+        traffic_rolling_origin_schedule_v3,
+        traffic_rolling_origin_event_windows_v3,
+        traffic_rolling_origin_summary_v3,
+    ) = build_traffic_rolling_origin_schedule_v3(
+        target_series_arg=traffic_target_segment_v2,
+        holiday_events_arg=traffic_holiday_event_dates_v2,
+    )
+    return (
+        traffic_rolling_origin_event_windows_v3,
+        traffic_rolling_origin_schedule_v3,
+        traffic_rolling_origin_summary_v3,
+    )
+
+
+@app.cell
+def _(traffic_rolling_origin_summary_v3):
+    traffic_rolling_origin_summary_v3
+    return
+
+
+@app.cell
+def _(traffic_rolling_origin_schedule_v3):
+    traffic_rolling_origin_schedule_v3.head(10)
+    return
+
+
+@app.cell
+def _(traffic_rolling_origin_schedule_v3):
+    traffic_rolling_origin_schedule_v3.tail(10)
+    return
+
+
+@app.cell
+def _(traffic_rolling_origin_event_windows_v3):
+    traffic_rolling_origin_event_windows_v3
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Holiday-calendar and target-coverage preflight
+    """)
+    return
+
+
+@app.function
+def inspect_traffic_rolling_calendar_v4(
+    raw_frame_arg,
+    target_series_arg,
+    schedule_arg,
+    horizon_arg=168,
+):
+    raw = raw_frame_arg[
+        ["date_time", "holiday"]
+    ].copy()
+
+    raw["date_time"] = pd.to_datetime(
+        raw["date_time"],
+        errors="coerce",
+    )
+    raw["calendar_date"] = raw["date_time"].dt.normalize()
+
+    raw["holiday_label"] = (
+        raw["holiday"]
+        .astype("string")
+        .str.strip()
+    )
+
+    raw["holiday_label"] = raw["holiday_label"].mask(
+        raw["holiday_label"].str.lower().isin(
+            ["", "nan", "none", "null"]
+        )
+    )
+
+    def resolve_holiday_day(values):
+        labels = sorted(set(values.dropna().tolist()))
+
+        if len(labels) > 1:
+            raise ValueError(
+                f"Multiple holiday labels on one date: {labels}"
+            )
+
+        return labels[0] if labels else "No holiday"
+
+    holiday_by_date = (
+        raw.dropna(subset=["calendar_date"])
+        .groupby("calendar_date")["holiday_label"]
+        .agg(resolve_holiday_day)
+        .sort_index()
+    )
+
+    target = target_series_arg.sort_index()
+    diagnostic_rows = []
+
+    for origin in schedule_arg["Forecast origin"]:
+        origin = pd.Timestamp(origin)
+
+        future_index = pd.date_range(
+            start=origin,
+            periods=horizon_arg,
+            freq="h",
+        )
+
+        future_dates = pd.DatetimeIndex(
+            future_index.normalize().unique()
+        )
+
+        daily_labels = holiday_by_date.reindex(
+            future_dates
+        )
+
+        unknown_dates = daily_labels.index[
+            daily_labels.isna()
+        ]
+
+        holiday_dates = daily_labels.index[
+            daily_labels.notna()
+            & daily_labels.ne("No holiday")
+        ]
+
+        no_holiday_dates = daily_labels.index[
+            daily_labels.eq("No holiday")
+        ]
+
+        future_actual = target.reindex(future_index)
+        valid_actual = int(
+            np.isfinite(future_actual.to_numpy(dtype=float)).sum()
+        )
+
+        diagnostic_rows.append({
+            "Forecast origin": origin,
+            "Valid future targets": valid_actual,
+            "Missing future targets": horizon_arg - valid_actual,
+            "Known holiday dates": len(holiday_dates),
+            "Known non-holiday dates": len(no_holiday_dates),
+            "Unknown calendar dates": len(unknown_dates),
+            "Unknown dates": ", ".join(
+                unknown_dates.strftime("%Y-%m-%d")
+            ),
+        })
+
+    diagnostics = pd.DataFrame(diagnostic_rows)
+
+    summary = pd.DataFrame([
+        {
+            "Metric": "Forecast origins inspected",
+            "Value": len(diagnostics),
+        },
+        {
+            "Metric": "Origins with complete calendar information",
+            "Value": int(
+                diagnostics["Unknown calendar dates"].eq(0).sum()
+            ),
+        },
+        {
+            "Metric": "Origins with unknown calendar dates",
+            "Value": int(
+                diagnostics["Unknown calendar dates"].gt(0).sum()
+            ),
+        },
+        {
+            "Metric": "Origins with all 168 actual observations",
+            "Value": int(
+                diagnostics["Valid future targets"].eq(horizon_arg).sum()
+            ),
+        },
+        {
+            "Metric": "Minimum valid future observations",
+            "Value": int(
+                diagnostics["Valid future targets"].min()
+            ),
+        },
+        {
+            "Metric": "Median valid future observations",
+            "Value": float(
+                diagnostics["Valid future targets"].median()
+            ),
+        },
+    ])
+
+    return holiday_by_date, diagnostics, summary
+
+
+@app.cell
+def _(
+    traffic_df_raw,
+    traffic_rolling_origin_schedule_v3,
+    traffic_target_segment_v2,
+):
+    (
+        traffic_holiday_calendar_v4,
+        traffic_rolling_diagnostics_v4,
+        traffic_rolling_diagnostics_summary_v4,
+    ) = inspect_traffic_rolling_calendar_v4(
+        raw_frame_arg=traffic_df_raw,
+        target_series_arg=traffic_target_segment_v2,
+        schedule_arg=traffic_rolling_origin_schedule_v3,
+    )
+    return (
+        traffic_holiday_calendar_v4,
+        traffic_rolling_diagnostics_summary_v4,
+        traffic_rolling_diagnostics_v4,
+    )
+
+
+@app.cell
+def _(traffic_rolling_diagnostics_summary_v4):
+    traffic_rolling_diagnostics_summary_v4
+    return
+
+
+@app.cell
+def _(traffic_rolling_diagnostics_v4):
+    traffic_rolling_diagnostics_v4.loc[
+        traffic_rolling_diagnostics_v4[
+            "Unknown calendar dates"
+        ].gt(0)
+    ]
+    return
+
+
+@app.cell
+def _(traffic_rolling_diagnostics_v4):
+    traffic_rolling_diagnostics_v4[
+        "Valid future targets"
+    ].describe()
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### Prepare the pilot origins
+    """)
+    return
+
+
+@app.cell
+def _(traffic_rolling_diagnostics_v4, traffic_rolling_origin_schedule_v3):
+    traffic_pilot_origin_dates_v5 = pd.to_datetime([
+        "2015-08-27",  # First State Fair occurrence
+        "2016-07-04",  # Independence Day
+        "2017-09-04",  # Labor Day
+        "2018-08-28",  # Labor Day, six days ahead
+        "2018-09-03",  # Labor Day, same day
+        "2018-09-10",  # Ordinary week
+    ])
+
+    traffic_pilot_schedule_v5 = (
+        traffic_rolling_origin_schedule_v3.loc[
+            traffic_rolling_origin_schedule_v3[
+                "Forecast origin"
+            ].isin(traffic_pilot_origin_dates_v5)
+        ]
+        .sort_values("Forecast origin")
+        .reset_index(drop=True)
+    )
+
+    traffic_pilot_diagnostics_v5 = (
+        traffic_rolling_diagnostics_v4.set_index(
+            "Forecast origin"
+        ).reindex(traffic_pilot_origin_dates_v5)
+        .reset_index()
+    )
+
+    if len(traffic_pilot_schedule_v5) != len(
+        traffic_pilot_origin_dates_v5
+    ):
+        raise ValueError("One or more pilot origins are missing.")
+
+    if (
+        traffic_pilot_diagnostics_v5[
+            "Unknown calendar dates"
+        ].ne(0).any()
+    ):
+        raise ValueError("A pilot origin has unknown future calendar dates.")
+
+    traffic_pilot_schedule_v5[
+        [
+            "Forecast origin",
+            "Forecast end",
+            "Historical context length",
+            "Valid future targets",
+            "Holiday dates in horizon",
+            "Holiday categories",
+        ]
+    ]
+    return (traffic_pilot_origin_dates_v5,)
+
+
+@app.cell
+def _(traffic_holiday_event_summary_v2):
+    traffic_holiday_vocabulary_pilot_v5 = tuple(
+        sorted(
+            {"No holiday"}
+            | set(
+                traffic_holiday_event_summary_v2[
+                    "holiday"
+                ].dropna().astype(str)
+            )
+        )
+    )
+
+    traffic_holiday_code_lookup_v5 = {
+        category: index
+        for index, category in enumerate(
+            traffic_holiday_vocabulary_pilot_v5
+        )
+    }
+
+    traffic_holiday_vocabulary_pilot_v5
+    return traffic_holiday_code_lookup_v5, traffic_holiday_vocabulary_pilot_v5
+
+
+@app.function
+def prepare_traffic_holiday_pilot_inputs_v5(
+    origin_arg,
+    target_series_arg,
+    weather_frame_arg,
+    holiday_calendar_arg,
+    category_lookup_arg,
+    category_vocabulary_arg,
+    horizon_arg=168,
+):
+    origin = pd.Timestamp(origin_arg)
+
+    target = target_series_arg.sort_index()
+
+    context_series = target.loc[
+        target.index < origin
+    ]
+
+    future_index = pd.date_range(
+        start=origin,
+        periods=horizon_arg,
+        freq="h",
+    )
+
+    future_actual = target.reindex(future_index).to_numpy(
+        dtype=np.float32
+    )
+
+    # Build daily holiday labels for historical and future timestamps.
+    history_date_keys = pd.Series(
+        context_series.index.normalize(),
+        index=context_series.index,
+    )
+
+    future_date_keys = pd.Series(
+        future_index.normalize(),
+        index=future_index,
+    )
+
+    historical_labels = history_date_keys.map(
+        holiday_calendar_arg
+    )
+
+    future_labels = future_date_keys.map(
+        holiday_calendar_arg
+    )
+
+    # Future calendar information must be complete for this pilot.
+    if future_labels.isna().any():
+        unknown_dates = (
+            future_labels.index[future_labels.isna()]
+            .normalize()
+            .unique()
+        )
+        raise ValueError(
+            f"Unknown future holiday dates at {origin}: "
+            f"{unknown_dates.tolist()}"
+        )
+
+    all_labels = pd.concat(
+        [historical_labels, future_labels]
+    )
+
+    # Fixed numerical category codes.
+    codes_series = all_labels.map(category_lookup_arg)
+
+    codes = codes_series.to_numpy(
+        dtype=np.float32,
+        na_value=np.nan,
+    )
+
+    known_mask = np.isfinite(codes)
+
+    # Binary indicator: 0 = no holiday, 1 = named holiday.
+    # Unknown historical dates remain NaN.
+    binary_values = np.full(
+        len(codes),
+        np.nan,
+        dtype=np.float32,
+    )
+
+    no_holiday_code = category_lookup_arg["No holiday"]
+
+    binary_values[known_mask] = (
+        codes[known_mask] != no_holiday_code
+    ).astype(np.float32)
+
+    # One-hot encoding: one row per fixed category.
+    # Unknown historical dates remain NaN in all category channels.
+    onehot_values = np.full(
+        (
+            len(category_vocabulary_arg),
+            len(codes),
+        ),
+        np.nan,
+        dtype=np.float32,
+    )
+
+    onehot_values[:, known_mask] = 0.0
+
+    for category_code in range(
+        len(category_vocabulary_arg)
+    ):
+        category_mask = (
+            known_mask & (codes == category_code)
+        )
+        onehot_values[
+            category_code,
+            category_mask,
+        ] = 1.0
+
+    # Historical traffic context.
+    context_values = context_series.to_numpy(
+        dtype=np.float32
+    ).reshape(1, 1, -1)
+
+    # Historical weather only.
+    weather_columns = [
+        "temp",
+        "rain_1h",
+        "snow_1h",
+        "clouds_all",
+    ]
+
+    weather_values = (
+        weather_frame_arg
+        .reindex(context_series.index)[weather_columns]
+        .to_numpy(dtype=np.float32)
+        .T[None, :, :]
+    )
+
+    # Covariate arrays include context + forecast horizon.
+    binary_covariates = binary_values.reshape(1, 1, -1)
+    categorical_covariates = codes.reshape(1, 1, -1)
+    onehot_covariates = onehot_values[None, :, :]
+
+    future_category_counts = (
+        future_labels.value_counts()
+        .rename_axis("Holiday category")
+        .reset_index(name="Hours")
+    )
+
+    metadata = {
+        "Forecast origin": origin,
+        "Forecast end": future_index[-1],
+        "Historical context length": len(context_series),
+        "Missing historical targets": int(
+            context_series.isna().sum()
+        ),
+        "Valid future targets": int(
+            np.isfinite(future_actual).sum()
+        ),
+        "Weather shape": str(weather_values.shape),
+        "Binary holiday shape": str(
+            binary_covariates.shape
+        ),
+        "Categorical holiday shape": str(
+            categorical_covariates.shape
+        ),
+        "One-hot holiday shape": str(
+            onehot_covariates.shape
+        ),
+    }
+
+    return {
+        "context": context_values,
+        "actual": future_actual,
+        "future_index": future_index,
+        "weather": weather_values,
+        "binary": binary_covariates,
+        "categorical": categorical_covariates,
+        "onehot": onehot_covariates,
+        "metadata": metadata,
+        "future_category_counts": future_category_counts,
+    }
+
+
+@app.function
+def run_traffic_holiday_pilot_v5(
+    origins_arg,
+    target_series_arg,
+    weather_frame_arg,
+    holiday_calendar_arg,
+    category_lookup_arg,
+    category_vocabulary_arg,
+    forecaster_arg,
+    horizon_arg=168,
+):
+    import time as _time
+
+    def to_numpy(values):
+        if hasattr(values, "detach"):
+            return values.detach().cpu().numpy()
+        return np.asarray(values)
+
+    approaches = [
+        "Target only",
+        "Target + weather",
+        "Weather + binary holiday",
+        "Weather + categorical holiday",
+        "Weather + one-hot holiday",
+    ]
+
+    metric_rows = []
+    prediction_frames = []
+    timing_rows = []
+    quantile_outputs = {}
+    input_metadata_rows = []
+
+    total_calls = len(origins_arg) * len(approaches)
+    call_number = 0
+
+    for origin in origins_arg:
+        inputs = prepare_traffic_holiday_pilot_inputs_v5(
+            origin_arg=origin,
+            target_series_arg=target_series_arg,
+            weather_frame_arg=weather_frame_arg,
+            holiday_calendar_arg=holiday_calendar_arg,
+            category_lookup_arg=category_lookup_arg,
+            category_vocabulary_arg=category_vocabulary_arg,
+            horizon_arg=horizon_arg,
+        )
+
+        input_metadata_rows.append(inputs["metadata"])
+
+        actual = inputs["actual"]
+        valid_mask = np.isfinite(actual)
+
+        actual_valid = actual[valid_mask]
+
+        for approach in approaches:
+            forecast_kwargs = {}
+
+            if approach != "Target only":
+                forecast_kwargs["past_covariates"] = (
+                    inputs["weather"]
+                )
+
+            if approach == "Weather + binary holiday":
+                forecast_kwargs["known_covariates"] = (
+                    inputs["binary"]
+                )
+
+            elif approach == "Weather + categorical holiday":
+                forecast_kwargs[
+                    "categorical_known_covariates"
+                ] = inputs["categorical"]
+
+            elif approach == "Weather + one-hot holiday":
+                forecast_kwargs["known_covariates"] = (
+                    inputs["onehot"]
+                )
+
+            call_number += 1
+            started = _time.perf_counter()
+
+            forecast = forecaster_arg.forecast(
+                inputs["context"],
+                prediction_length=horizon_arg,
+                **forecast_kwargs,
+            )
+
+            elapsed = _time.perf_counter() - started
+
+            median = to_numpy(forecast.median)[0, 0]
+            quantiles = to_numpy(
+                forecast.quantiles
+            )[0, 0]
+
+            levels = np.asarray(
+                forecast.quantile_levels,
+                dtype=float,
+            )
+
+            if median.shape != (horizon_arg,):
+                raise ValueError(
+                    f"Unexpected median shape: {median.shape}"
+                )
+
+            if quantiles.shape != (
+                horizon_arg,
+                len(levels),
+            ):
+                raise ValueError(
+                    f"Unexpected quantile shape: {quantiles.shape}"
+                )
+
+            median_valid = median[valid_mask]
+            quantiles_valid = quantiles[valid_mask]
+
+            errors = actual_valid - median_valid
+
+            mae = float(np.mean(np.abs(errors)))
+            rmse = float(np.sqrt(np.mean(errors**2)))
+
+            actual_denominator = np.sum(
+                np.abs(actual_valid)
+            )
+
+            wape = (
+                float(
+                    np.sum(np.abs(errors))
+                    / actual_denominator
+                    * 100
+                )
+                if actual_denominator > 0
+                else np.nan
+            )
+
+            q10_index = int(
+                np.argmin(np.abs(levels - 0.10))
+            )
+            q90_index = int(
+                np.argmin(np.abs(levels - 0.90))
+            )
+
+            lower = quantiles_valid[:, q10_index]
+            upper = quantiles_valid[:, q90_index]
+
+            coverage = float(
+                np.mean(
+                    (actual_valid >= lower)
+                    & (actual_valid <= upper)
+                )
+                * 100
+            )
+
+            interval_width = float(
+                np.mean(upper - lower)
+            )
+
+            quantile_errors = (
+                actual_valid[:, None] - quantiles_valid
+            )
+
+            pinball = np.maximum(
+                levels[None, :] * quantile_errors,
+                (levels[None, :] - 1.0) * quantile_errors,
+            )
+
+            mean_pinball = float(np.mean(pinball))
+
+            metric_rows.append({
+                "Forecast origin": pd.Timestamp(origin),
+                "Approach": approach,
+                "Valid observations": len(actual_valid),
+                "MAE": mae,
+                "RMSE": rmse,
+                "WAPE (%)": wape,
+                "80% coverage (%)": coverage,
+                "80% interval width": interval_width,
+                "Mean pinball loss": mean_pinball,
+                "Runtime (seconds)": elapsed,
+            })
+
+            prediction_frames.append(
+                pd.DataFrame({
+                    "Forecast origin": pd.Timestamp(origin),
+                    "Timestamp": inputs["future_index"],
+                    "Approach": approach,
+                    "Actual": actual,
+                    "Forecast": median,
+                })
+            )
+
+            quantile_outputs[
+                (str(pd.Timestamp(origin)), approach)
+            ] = quantiles.copy()
+
+            timing_rows.append({
+                "Forecast origin": pd.Timestamp(origin),
+                "Approach": approach,
+                "Runtime (seconds)": elapsed,
+            })
+
+            print(
+                f"[{call_number}/{total_calls}] "
+                f"{pd.Timestamp(origin).date()} | "
+                f"{approach} | "
+                f"{elapsed:.2f} seconds"
+            )
+
+    metrics = (
+        pd.DataFrame(metric_rows)
+        .sort_values(["Forecast origin", "Approach"])
+        .reset_index(drop=True)
+    )
+
+    predictions = pd.concat(
+        prediction_frames,
+        ignore_index=True,
+    )
+
+    timings = (
+        pd.DataFrame(timing_rows)
+        .sort_values(["Forecast origin", "Approach"])
+        .reset_index(drop=True)
+    )
+
+    metadata = pd.DataFrame(input_metadata_rows)
+
+    return metrics, predictions, quantile_outputs, timings, metadata
+
+
+@app.cell
+def _(
+    traffic_forecaster_v1,
+    traffic_holiday_calendar_v4,
+    traffic_holiday_code_lookup_v5,
+    traffic_holiday_vocabulary_pilot_v5,
+    traffic_pilot_origin_dates_v5,
+    traffic_target_segment_v2,
+    traffic_weather_hourly_v1,
+):
+    (
+        traffic_holiday_pilot_metrics_v5,
+        traffic_holiday_pilot_predictions_v5,
+        traffic_holiday_pilot_quantiles_v5,
+        traffic_holiday_pilot_timings_v5,
+        traffic_holiday_pilot_metadata_v5,
+    ) = run_traffic_holiday_pilot_v5(
+        origins_arg=traffic_pilot_origin_dates_v5,
+        target_series_arg=traffic_target_segment_v2,
+        weather_frame_arg=traffic_weather_hourly_v1,
+        holiday_calendar_arg=traffic_holiday_calendar_v4,
+        category_lookup_arg=traffic_holiday_code_lookup_v5,
+        category_vocabulary_arg=traffic_holiday_vocabulary_pilot_v5,
+        forecaster_arg=traffic_forecaster_v1,
+        horizon_arg=168,
+    )
+    return (
+        traffic_holiday_pilot_metadata_v5,
+        traffic_holiday_pilot_metrics_v5,
+        traffic_holiday_pilot_predictions_v5,
+        traffic_holiday_pilot_timings_v5,
+    )
+
+
+@app.cell
+def _(traffic_holiday_pilot_metadata_v5):
+    traffic_holiday_pilot_metadata_v5
+    return
+
+
+@app.cell
+def _(traffic_holiday_pilot_metrics_v5):
+    traffic_holiday_pilot_metrics_v5.round(3)
+    return
+
+
+@app.cell
+def _(traffic_holiday_pilot_timings_v5):
+    (
+        traffic_holiday_pilot_timings_v5
+        .groupby("Approach")["Runtime (seconds)"]
+        .agg(["count", "mean", "median", "max", "sum"])
+        .round(2)
+    )
+    return
+
+
+@app.cell
+def _(traffic_holiday_pilot_timings_v5):
+    traffic_holiday_pilot_timings_v5[
+        "Runtime (seconds)"
+    ].sum().round(2)
+    return
+
+
+@app.cell(hide_code=True)
+def _():
+    mo.md(r"""
+    #### test batched inference
+    """)
+    return
+
+
+@app.function
+def benchmark_traffic_batch_padding_v6(
+    origins_arg,
+    target_series_arg,
+    weather_frame_arg,
+    holiday_calendar_arg,
+    category_lookup_arg,
+    category_vocabulary_arg,
+    forecaster_arg,
+    reference_predictions_arg,
+    reference_timings_arg,
+    horizon_arg=168,
+):
+    import time as _time
+
+    prepared = [
+        prepare_traffic_holiday_pilot_inputs_v5(
+            origin_arg=origin,
+            target_series_arg=target_series_arg,
+            weather_frame_arg=weather_frame_arg,
+            holiday_calendar_arg=holiday_calendar_arg,
+            category_lookup_arg=category_lookup_arg,
+            category_vocabulary_arg=category_vocabulary_arg,
+            horizon_arg=horizon_arg,
+        )
+        for origin in origins_arg
+    ]
+
+    max_context_length = max(
+        item["context"].shape[-1]
+        for item in prepared
+    )
+
+    def left_pad_nan(array_arg, padding_arg):
+        return np.pad(
+            array_arg,
+            ((0, 0), (0, 0), (padding_arg, 0)),
+            mode="constant",
+            constant_values=np.nan,
+        )
+
+    context_batch = np.concatenate(
+        [
+            left_pad_nan(
+                item["context"],
+                max_context_length - item["context"].shape[-1],
+            )
+            for item in prepared
+        ],
+        axis=0,
+    )
+
+    weather_batch = np.concatenate(
+        [
+            left_pad_nan(
+                item["weather"],
+                max_context_length - item["weather"].shape[-1],
+            )
+            for item in prepared
+        ],
+        axis=0,
+    )
+
+    started = _time.perf_counter()
+
+    batch_forecast = forecaster_arg.forecast(
+        context_batch,
+        prediction_length=horizon_arg,
+        past_covariates=weather_batch,
+    )
+
+    batch_runtime = _time.perf_counter() - started
+
+    batch_median = (
+        batch_forecast.median
+        .detach()
+        .cpu()
+        .numpy()
+    )
+
+    comparison_rows = []
+
+    for index, origin in enumerate(origins_arg):
+        origin_timestamp = pd.Timestamp(origin)
+
+        reference = (
+            reference_predictions_arg.loc[
+                (
+                    reference_predictions_arg["Forecast origin"]
+                    == origin_timestamp
+                )
+                & (
+                    reference_predictions_arg["Approach"]
+                    == "Target + weather"
+                )
+            ]
+            .sort_values("Timestamp")["Forecast"]
+            .to_numpy()
+        )
+
+        batched = batch_median[index, 0]
+
+        difference = np.abs(batched - reference)
+
+        comparison_rows.append({
+            "Forecast origin": origin_timestamp,
+            "Maximum absolute difference": float(
+                np.max(difference)
+            ),
+            "Mean absolute difference": float(
+                np.mean(difference)
+            ),
+        })
+
+    single_runtime = reference_timings_arg.loc[
+        reference_timings_arg["Forecast origin"].isin(
+            pd.to_datetime(origins_arg)
+        )
+        & (
+            reference_timings_arg["Approach"]
+            == "Target + weather"
+        ),
+        "Runtime (seconds)",
+    ].sum()
+
+    runtime_summary = pd.DataFrame([
+        {
+            "Execution": "Individual calls",
+            "Runtime (seconds)": single_runtime,
+        },
+        {
+            "Execution": "Batched call",
+            "Runtime (seconds)": batch_runtime,
+        },
+    ])
+
+    return (
+        pd.DataFrame(comparison_rows),
+        runtime_summary,
+    )
+
+
+@app.cell
+def _(
+    traffic_forecaster_v1,
+    traffic_holiday_calendar_v4,
+    traffic_holiday_code_lookup_v5,
+    traffic_holiday_pilot_predictions_v5,
+    traffic_holiday_pilot_timings_v5,
+    traffic_holiday_vocabulary_pilot_v5,
+    traffic_target_segment_v2,
+    traffic_weather_hourly_v1,
+):
+    traffic_batch_test_origins_v6 = pd.to_datetime([
+        "2018-08-28",
+        "2018-09-03",
+    ])
+
+    (
+        traffic_batch_comparison_v6,
+        traffic_batch_runtime_v6,
+    ) = benchmark_traffic_batch_padding_v6(
+        origins_arg=traffic_batch_test_origins_v6,
+        target_series_arg=traffic_target_segment_v2,
+        weather_frame_arg=traffic_weather_hourly_v1,
+        holiday_calendar_arg=traffic_holiday_calendar_v4,
+        category_lookup_arg=traffic_holiday_code_lookup_v5,
+        category_vocabulary_arg=traffic_holiday_vocabulary_pilot_v5,
+        forecaster_arg=traffic_forecaster_v1,
+        reference_predictions_arg=traffic_holiday_pilot_predictions_v5,
+        reference_timings_arg=traffic_holiday_pilot_timings_v5,
+    )
+    return traffic_batch_comparison_v6, traffic_batch_runtime_v6
+
+
+@app.cell
+def _(traffic_batch_comparison_v6):
+    traffic_batch_comparison_v6
+    return
+
+
+@app.cell
+def _(traffic_batch_runtime_v6):
+    traffic_batch_runtime_v6
+    return
+
+
+@app.function
+def benchmark_traffic_adjacent_batch_v7(
+    origins_arg,
+    target_series_arg,
+    weather_frame_arg,
+    holiday_calendar_arg,
+    category_lookup_arg,
+    category_vocabulary_arg,
+    forecaster_arg,
+    approach_arg="Weather + categorical holiday",
+    horizon_arg=168,
+):
+    import time as _time
+
+    def to_numpy(values):
+        if hasattr(values, "detach"):
+            return values.detach().cpu().numpy()
+        return np.asarray(values)
+
+    def make_kwargs(item):
+        if approach_arg == "Target only":
+            return {}
+
+        kwargs = {
+            "past_covariates": item["weather"]
+        }
+
+        if approach_arg == "Target + weather":
+            return kwargs
+
+        if approach_arg == "Weather + binary holiday":
+            kwargs["known_covariates"] = item["binary"]
+
+        elif approach_arg == "Weather + categorical holiday":
+            kwargs["categorical_known_covariates"] = (
+                item["categorical"]
+            )
+
+        elif approach_arg == "Weather + one-hot holiday":
+            kwargs["known_covariates"] = item["onehot"]
+
+        else:
+            raise ValueError(
+                f"Unsupported approach: {approach_arg}"
+            )
+
+        return kwargs
+
+    prepared = [
+        prepare_traffic_holiday_pilot_inputs_v5(
+            origin_arg=origin,
+            target_series_arg=target_series_arg,
+            weather_frame_arg=weather_frame_arg,
+            holiday_calendar_arg=holiday_calendar_arg,
+            category_lookup_arg=category_lookup_arg,
+            category_vocabulary_arg=category_vocabulary_arg,
+            horizon_arg=horizon_arg,
+        )
+        for origin in origins_arg
+    ]
+
+    max_context = max(
+        item["context"].shape[-1]
+        for item in prepared
+    )
+
+    def pad_left(array_arg, target_length_arg):
+        padding = target_length_arg - array_arg.shape[-1]
+
+        return np.pad(
+            array_arg,
+            ((0, 0), (0, 0), (padding, 0)),
+            mode="constant",
+            constant_values=np.nan,
+        )
+
+    # Reference: individual forecasts.
+    individual_medians = []
+    individual_quantiles = []
+
+    started = _time.perf_counter()
+
+    for item in prepared:
+        forecast = forecaster_arg.forecast(
+            item["context"],
+            prediction_length=horizon_arg,
+            **make_kwargs(item),
+        )
+
+        individual_medians.append(
+            to_numpy(forecast.median)[0, 0]
+        )
+
+        individual_quantiles.append(
+            to_numpy(forecast.quantiles)[0, 0]
+        )
+
+    individual_runtime = (
+        _time.perf_counter() - started
+    )
+
+    # Prepare batch with right-aligned historical contexts.
+    context_batch = np.concatenate(
+        [
+            pad_left(item["context"], max_context)
+            for item in prepared
+        ],
+        axis=0,
+    )
+
+    batch_kwargs = {}
+
+    if approach_arg != "Target only":
+        batch_kwargs["past_covariates"] = np.concatenate(
+            [
+                pad_left(item["weather"], max_context)
+                for item in prepared
+            ],
+            axis=0,
+        )
+
+    if approach_arg == "Weather + binary holiday":
+        batch_kwargs["known_covariates"] = np.concatenate(
+            [
+                pad_left(
+                    item["binary"],
+                    max_context + horizon_arg,
+                )
+                for item in prepared
+            ],
+            axis=0,
+        )
+
+    elif approach_arg == "Weather + categorical holiday":
+        batch_kwargs[
+            "categorical_known_covariates"
+        ] = np.concatenate(
+            [
+                pad_left(
+                    item["categorical"],
+                    max_context + horizon_arg,
+                )
+                for item in prepared
+            ],
+            axis=0,
+        )
+
+    elif approach_arg == "Weather + one-hot holiday":
+        batch_kwargs["known_covariates"] = np.concatenate(
+            [
+                pad_left(
+                    item["onehot"],
+                    max_context + horizon_arg,
+                )
+                for item in prepared
+            ],
+            axis=0,
+        )
+
+    # Reference: one batched forecast.
+    started = _time.perf_counter()
+
+    batch_forecast = forecaster_arg.forecast(
+        context_batch,
+        prediction_length=horizon_arg,
+        **batch_kwargs,
+    )
+
+    batch_runtime = _time.perf_counter() - started
+
+    batch_medians = to_numpy(batch_forecast.median)
+    batch_quantiles = to_numpy(batch_forecast.quantiles)
+
+    comparison_rows = []
+
+    for index, origin in enumerate(origins_arg):
+        median_difference = np.abs(
+            batch_medians[index, 0]
+            - individual_medians[index]
+        )
+
+        quantile_difference = np.abs(
+            batch_quantiles[index, 0]
+            - individual_quantiles[index]
+        )
+
+        comparison_rows.append({
+            "Forecast origin": pd.Timestamp(origin),
+            "Median max difference": float(
+                median_difference.max()
+            ),
+            "Median mean difference": float(
+                median_difference.mean()
+            ),
+            "Quantile max difference": float(
+                quantile_difference.max()
+            ),
+            "Quantile mean difference": float(
+                quantile_difference.mean()
+            ),
+        })
+
+    padding_rows = []
+
+    for origin, item in zip(origins_arg, prepared):
+        original_length = item["context"].shape[-1]
+
+        padding_rows.append({
+            "Forecast origin": pd.Timestamp(origin),
+            "Original context length": original_length,
+            "Left-padding hours": (
+                max_context - original_length
+            ),
+        })
+
+    runtime_summary = pd.DataFrame([
+        {
+            "Execution": "Individual calls",
+            "Forecast calls": len(prepared),
+            "Runtime (seconds)": individual_runtime,
+        },
+        {
+            "Execution": "Batched call",
+            "Forecast calls": 1,
+            "Runtime (seconds)": batch_runtime,
+        },
+    ])
+
+    return (
+        pd.DataFrame(comparison_rows),
+        runtime_summary,
+        pd.DataFrame(padding_rows),
+    )
+
+
+@app.cell
+def _(
+    traffic_forecaster_v1,
+    traffic_holiday_calendar_v4,
+    traffic_holiday_code_lookup_v5,
+    traffic_holiday_vocabulary_pilot_v5,
+    traffic_target_segment_v2,
+    traffic_weather_hourly_v1,
+):
+    traffic_batch_test_origins_v7 = pd.to_datetime([
+        "2018-08-28",
+        "2018-08-29",
+        "2018-08-30",
+    ])
+
+    (
+        traffic_batch_comparison_v7,
+        traffic_batch_runtime_v7,
+        traffic_batch_padding_v7,
+    ) = benchmark_traffic_adjacent_batch_v7(
+        origins_arg=traffic_batch_test_origins_v7,
+        target_series_arg=traffic_target_segment_v2,
+        weather_frame_arg=traffic_weather_hourly_v1,
+        holiday_calendar_arg=traffic_holiday_calendar_v4,
+        category_lookup_arg=traffic_holiday_code_lookup_v5,
+        category_vocabulary_arg=traffic_holiday_vocabulary_pilot_v5,
+        forecaster_arg=traffic_forecaster_v1,
+        approach_arg="Weather + categorical holiday",
+        horizon_arg=168,
+    )
+    return (
+        traffic_batch_comparison_v7,
+        traffic_batch_padding_v7,
+        traffic_batch_runtime_v7,
+    )
+
+
+@app.cell
+def _(traffic_batch_comparison_v7):
+    traffic_batch_comparison_v7
+    return
+
+
+@app.cell
+def _(traffic_batch_runtime_v7):
+    traffic_batch_runtime_v7
+    return
+
+
+@app.cell
+def _(traffic_batch_padding_v7):
+    traffic_batch_padding_v7
     return
 
 
